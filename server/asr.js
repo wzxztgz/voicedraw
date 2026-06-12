@@ -65,6 +65,7 @@ class DashScopeASR {
               format: this.format,
               sample_rate: this.sampleRate,
               language_hints: ['zh'],
+              max_sentence_silence: 800,
             },
           },
         };

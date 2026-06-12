@@ -23,6 +23,10 @@ class VoiceDrawApp {
     this.toast = null;
     this.isProcessing = false;
     this.previewTimeout = null;
+    // 句子累积缓冲（处理 ASR VAD 在停顿处切割句子的问题）
+    this.sentenceBuffer = '';
+    this.bufferFlushTimer = null;
+    this.BUFFER_WINDOW = 1500; // 缓冲窗口 1.5 秒
   }
 
   /**
@@ -103,31 +107,122 @@ class VoiceDrawApp {
   _onASRResult(text, isFinal) {
     if (!text || !text.trim()) return;
 
-    // 更新实时文本显示
     const transcriptEl = document.getElementById('transcript');
-    if (transcriptEl) {
-      transcriptEl.textContent = text;
-      transcriptEl.classList.toggle('final', isFinal);
-    }
 
     if (!isFinal) {
-      // 实时关键词检测 → 触发预渲染
-      const keywords = detectKeywords(text);
-      store.set('detectedKeywords', keywords);
+      // 非最终结果：显示"已缓冲 + 当前实时"，用完整上下文做关键词检测
+      const fullContext = this.sentenceBuffer ? this.sentenceBuffer + text : text;
 
-      // 如果检测到形状，生成预览
-      if (keywords.shape && !store.state.preview) {
-        this._generatePreview(keywords);
-      } else if (store.state.preview && keywords) {
-        // 更新预览参数
-        this._updatePreview(keywords);
+      if (transcriptEl) {
+        transcriptEl.textContent = fullContext;
+        transcriptEl.classList.remove('final');
       }
 
+      const keywords = detectKeywords(fullContext);
+      store.set('detectedKeywords', keywords);
+
+      const hasAnyKeyword = keywords.shape || keywords.color || keywords.position || keywords.size;
+      if (keywords.hasDrawIntent && hasAnyKeyword && !store.state.preview) {
+        this._generatePreview(keywords);
+      } else if (store.state.preview && hasAnyKeyword) {
+        this._updatePreview(keywords);
+      }
       return;
     }
 
-    // 最终结果 → 解析并执行指令
-    this._processCommand(text);
+    // 最终结果 → 交给句子缓冲处理
+    this._handleFinalSentence(text);
+  }
+
+  /**
+   * 处理一条最终句子（ASR sentence_end=true）
+   * 核心逻辑：累积句子 → 完整指令立即执行，否则等缓冲窗口后再执行
+   */
+  _handleFinalSentence(text) {
+    // 暂停预览自动确认计时器，避免缓冲期间误触发
+    if (this.previewTimeout) {
+      clearTimeout(this.previewTimeout);
+      this.previewTimeout = null;
+    }
+
+    // 拼接到缓冲区
+    const accumulated = (this.sentenceBuffer + text).trim();
+    this.sentenceBuffer = accumulated;
+
+    const transcriptEl = document.getElementById('transcript');
+    if (transcriptEl) {
+      transcriptEl.textContent = accumulated;
+      transcriptEl.classList.add('final');
+    }
+
+    // 完整指令 → 立即执行，无需等待窗口
+    if (this._isCompleteCommand(accumulated)) {
+      this._flushBuffer();
+      return;
+    }
+
+    // 不完整 → 启动/重置缓冲窗口计时器
+    if (this.bufferFlushTimer) clearTimeout(this.bufferFlushTimer);
+    this.bufferFlushTimer = setTimeout(() => this._flushBuffer(), this.BUFFER_WINDOW);
+  }
+
+  /**
+   * 刷新缓冲区：执行累积文本并清空
+   */
+  _flushBuffer() {
+    if (this.bufferFlushTimer) {
+      clearTimeout(this.bufferFlushTimer);
+      this.bufferFlushTimer = null;
+    }
+    const text = this.sentenceBuffer.trim();
+    this.sentenceBuffer = '';
+    if (text) {
+      this._processCommand(text);
+    }
+  }
+
+  /**
+   * 判断文本是否构成完整指令（有对应动词 + 宾语/目标）
+   * 完整 → 立即执行；不完整 → 等缓冲窗口，期待后续补充
+   */
+  _isCompleteCommand(text) {
+    const t = text.trim();
+
+    // 即时单句指令（无需宾语）
+    const instant = ['确认', '好的', '对', '是的', '没错', '取消', '不要', '算了', '不对',
+      '撤销', '撤回', '上一步', '重做', '恢复', '帮助', '清除', '清空', '全部删除', '重新开始'];
+    if (instant.some((w) => t.includes(w))) return true;
+
+    // 绘制：绘制动词 + 形状词
+    const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成',
+      '来个', '来一个', '整个', '整一个', '加个', '加一个', '做个', '做一个', '弄个', '弄一个'];
+    const shapeWords = ['圆', '矩形', '方形', '长方形', '正方形', '方块',
+      '直线', '线段', '线条', '三角', '星', '椭圆'];
+    if (drawVerbs.some((v) => t.includes(v)) && shapeWords.some((s) => t.includes(s))) return true;
+
+    // 移动：移动词 + 方向词
+    const hasMoveVerb = t.includes('移') || t.includes('动');
+    const directions = ['左', '右', '上', '下'];
+    if (hasMoveVerb && directions.some((d) => t.includes(d))) return true;
+
+    // 改色：修改动词 + 颜色词
+    const colorVerbs = ['改成', '变成', '换成', '调成', '改为', '变为', '换为',
+      '改颜色', '变颜色', '换颜色', '改色', '变色', '换色', '修改颜色', '调整颜色'];
+    const colorWords = ['红', '蓝', '绿', '黄', '紫', '橙', '黑', '白', '粉', '青', '灰'];
+    if (colorVerbs.some((v) => t.includes(v)) && colorWords.some((c) => t.includes(c))) return true;
+
+    // 缩放：专属动词短语即完整（不依赖宾语）
+    const sizeVerbs = ['放大', '缩小', '变大', '变小', '调大', '调小',
+      '大一点', '大一些', '小一点', '小一些', '大很多', '小很多', '增大', '扩大'];
+    if (sizeVerbs.some((v) => t.includes(v))) return true;
+
+    // 选中：选中词 + 目标（编号或形状）
+    const hasSelect = t.includes('选中') || t.includes('选择') || t.includes('点击');
+    const hasTarget = /\d+\s*号|[一二三四五六七八九十]+\s*号|第\s*[\d一二三四五六七八九十]/.test(t)
+      || ['圆', '矩形', '方形', '直线', '三角', '星', '椭圆'].some((s) => t.includes(s));
+    if (hasSelect && hasTarget) return true;
+
+    return false;
   }
 
   /**
