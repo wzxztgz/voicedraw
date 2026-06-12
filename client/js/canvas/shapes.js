@@ -28,13 +28,28 @@ export function createShape(type, options = {}) {
  * @param {CanvasRenderingContext2D} ctx
  * @param {object} shape - 图形对象
  * @param {boolean} isPreview - 是否为预览模式
+ *
+ * 预览阶段（shape._stage）：
+ *   1 = 仅位置已知 → 红色虚线定位圆，高透明度
+ *   2 = 颜色/部分信息已知 → 彩色虚线圆，中等透明度
+ *   3 = 形状确认 → 实线实体，轻微透明度
  */
 export function drawShape(ctx, shape, isPreview = false) {
   ctx.save();
 
   if (isPreview) {
-    ctx.globalAlpha = 0.4;
-    ctx.setLineDash([8, 4]);
+    const stage = shape._stage || 2;
+    if (stage === 1) {
+      ctx.globalAlpha = 0.30;
+      ctx.setLineDash([6, 4]);
+    } else if (stage === 2) {
+      ctx.globalAlpha = 0.55;
+      ctx.setLineDash([8, 4]);
+    } else {
+      // 阶段3：形状已确认，实线但保留轻微透明感
+      ctx.globalAlpha = 0.82;
+      ctx.setLineDash([]);
+    }
   }
 
   ctx.strokeStyle = shape.color || '#333';

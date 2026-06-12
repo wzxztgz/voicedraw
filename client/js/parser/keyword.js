@@ -108,18 +108,18 @@ export function parseCommand(text) {
  * 解析绘制指令
  */
 function parseDraw(text) {
-  // 匹配形状关键词
-  const shapeKeywords = {
-    circle: ['圆', '圆形', '圆圈'],
-    rect: ['矩形', '方形', '长方形', '正方形', '方块'],
-    line: ['直线', '线段', '线条'],
-    triangle: ['三角形', '三角'],
-    star: ['星形', '星星', '五角星'],
-    ellipse: ['椭圆', '椭圆形'],
-  };
+  // 匹配形状关键词（有序数组：长词/复合词优先，避免"椭圆形"被"圆"、"三角形"被"三角"误匹配）
+  const shapeKeywords = [
+    ['ellipse',  ['椭圆形', '椭圆']],
+    ['triangle', ['三角形', '三角']],
+    ['rect',     ['矩形', '长方形', '正方形', '方形', '方块']],
+    ['line',     ['直线', '线段', '线条']],
+    ['star',     ['五角星', '星形', '星星']],
+    ['circle',   ['圆形', '圆圈', '圆']],
+  ];
 
   let shapeType = null;
-  for (const [type, keywords] of Object.entries(shapeKeywords)) {
+  for (const [type, keywords] of shapeKeywords) {
     if (keywords.some((kw) => text.includes(kw))) {
       shapeType = type;
       break;
@@ -128,10 +128,9 @@ function parseDraw(text) {
 
   if (!shapeType) return null;
 
-  // 检查是否是修改/移动等操作中的形状提及（非绘制）
-  if (text.includes('改') || text.includes('变') || text.includes('移') || text.includes('选') || text.includes('删除')) {
-    return null;
-  }
+  // 必须包含明确的绘制动词才触发
+  const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成', '来个', '来一个', '整个', '整一个', '加个', '加一个', '做个', '做一个', '弄个', '弄一个'];
+  if (!drawVerbs.some((v) => text.includes(v))) return null;
 
   // 提取颜色
   let color = null;
@@ -160,13 +159,44 @@ function parseDraw(text) {
 }
 
 /**
+ * 将中文数字转为阿拉伯数字（支持 一~二十）
+ */
+function chineseNumToInt(str) {
+  const map = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+    '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15, '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20 };
+  return map[str] ?? null;
+}
+
+/**
+ * 从文本中提取编号（支持阿拉伯数字和中文数字）
+ * 匹配：3号 / 三号 / 第3个 / 第三个
+ */
+function extractNumber(text) {
+  // 阿拉伯数字：3号 / 第3个 / 第3号
+  const arabicMatch = text.match(/第\s*(\d+)|(\d+)\s*号/);
+  if (arabicMatch) return parseInt(arabicMatch[1] ?? arabicMatch[2]);
+
+  // 中文数字：三号 / 第三个 / 第三号
+  // 注意：中文数字 Unicode 码点不连续，必须用枚举而非范围 [一-九]
+  const CN = '[一二三四五六七八九]';
+  const chineseMatch = text.match(
+    new RegExp(`第\\s*(二十|十${CN}|${CN}十?|十)\\s*[个号]?|(二十|十${CN}|${CN}|十)\\s*号`)
+  );
+  if (chineseMatch) {
+    const raw = chineseMatch[1] ?? chineseMatch[2];
+    return chineseNumToInt(raw);
+  }
+
+  return null;
+}
+
+/**
  * 解析选中指令
  */
 function parseSelect(text) {
-  // "选中 N 号"
-  const numMatch = text.match(/(\d+)\s*号/);
-  if (numMatch || text.match(/第\s*(\d+)/)) {
-    const num = parseInt(numMatch ? numMatch[1] : text.match(/第\s*(\d+)/)[1]);
+  // "选中3号" / "选中三号" / "第2个" / "第二个"
+  const num = extractNumber(text);
+  if (num !== null) {
     return { type: 'select', target: { type: 'id', value: num } };
   }
 
@@ -174,8 +204,15 @@ function parseSelect(text) {
   if (text.includes('选中') || text.includes('选择') || text.includes('点击')) {
     // 提取形状
     let shapeType = null;
-    const shapeKeywords = { circle: ['圆'], rect: ['矩形', '方形', '方块'], line: ['直线', '线'], triangle: ['三角'], star: ['星'], ellipse: ['椭圆'] };
-    for (const [type, keywords] of Object.entries(shapeKeywords)) {
+    const shapeKeywords = [
+      ['ellipse',  ['椭圆形', '椭圆']],
+      ['triangle', ['三角形', '三角']],
+      ['rect',     ['矩形', '方形', '方块']],
+      ['line',     ['直线', '线']],
+      ['star',     ['星形', '星星', '星']],
+      ['circle',   ['圆形', '圆']],
+    ];
+    for (const [type, keywords] of shapeKeywords) {
       if (keywords.some((kw) => text.includes(kw))) {
         shapeType = type;
         break;
@@ -192,15 +229,12 @@ function parseSelect(text) {
 
 /**
  * 解析颜色修改指令
+ * 必须包含明确的修改动词，避免绘制/描述指令误触发
  */
 function parseColorChange(text) {
-  if (!text.includes('颜色') && !text.includes('改成') && !text.includes('变成') && !text.includes('换')) {
-    // 检查 "把它变红" 这种简写
-    const hasColorWord = Object.keys(COLOR_MAP).some((name) => text.includes(name));
-    if (!hasColorWord) return null;
-    // 如果有颜色词但没有明确修改意图，不处理（可能是绘制指令）
-    if (text.includes('画') || text.includes('添加') || text.includes('创建')) return null;
-  }
+  // 必须包含颜色修改动词
+  const colorChangeVerbs = ['改成', '变成', '换成', '调成', '改为', '变为', '换为', '改颜色', '变颜色', '换颜色', '换个', '改个', '颜色改', '颜色变', '颜色换', '改色', '变色', '换色', '修改颜色', '调整颜色'];
+  if (!colorChangeVerbs.some((v) => text.includes(v))) return null;
 
   let color = null;
   let colorName = null;
@@ -219,26 +253,33 @@ function parseColorChange(text) {
 
 /**
  * 解析大小调整指令
+ * 必须包含完整的缩放动词短语，避免"画一个大圆"等误触发
  */
 function parseSizeChange(text) {
-  if (!text.includes('大') && !text.includes('小') && !text.includes('放大') && !text.includes('缩小') && !text.includes('尺寸')) {
-    return null;
-  }
+  // 放大类动词短语
+  const enlargeVerbs = ['放大', '变大', '调大', '改大', '大一点', '大一些', '大很多', '增大', '扩大', '大两倍', '大一倍'];
+  // 缩小类动词短语
+  const shrinkVerbs = ['缩小', '变小', '调小', '改小', '小一点', '小一些', '小很多', '减小', '压缩', '小一半', '小两倍'];
+
+  const isEnlarge = enlargeVerbs.some((v) => text.includes(v));
+  const isShrink = shrinkVerbs.some((v) => text.includes(v));
+
+  if (!isEnlarge && !isShrink) return null;
 
   let factor = 1;
-  if (text.includes('大') || text.includes('放大')) {
-    if (text.includes('很多') || text.includes('两倍') || text.includes('一倍')) {
+  if (isEnlarge) {
+    if (text.includes('很多') || text.includes('两倍') || text.includes('一倍') || text.includes('扩大')) {
       factor = 2.0;
     } else if (text.includes('一半')) {
       factor = 1.5;
     } else {
-      factor = 1.2; // 默认放大 20%
+      factor = 1.2;
     }
-  } else if (text.includes('小') || text.includes('缩小')) {
-    if (text.includes('很多') || text.includes('一半') || text.includes('两倍')) {
+  } else {
+    if (text.includes('很多') || text.includes('一半') || text.includes('两倍') || text.includes('压缩')) {
       factor = 0.5;
     } else {
-      factor = 0.8; // 默认缩小 20%
+      factor = 0.8;
     }
   }
 
@@ -247,11 +288,20 @@ function parseSizeChange(text) {
 
 /**
  * 解析移动指令
+ * "移到X" / "移动到X" → 绝对位置移动 (moveTo)
+ * "向/往X移一点" → 相对位移 (move)
  */
 function parseMove(text) {
-  if (!text.includes('移') && !text.includes('动') && !text.includes('到')) {
+  // 绝对位置移动："移到右上角" / "移动到中间"
+  const isAbsolute = text.includes('移到') || text.includes('移动到');
+  if (isAbsolute) {
+    const position = parsePosition(text);
+    if (position) return { type: 'moveTo', position };
     return null;
   }
+
+  // 相对移动："向右移一点" / "往左下移动一些"
+  if (!text.includes('移') && !text.includes('动')) return null;
 
   const movement = parseMovement(text);
   if (!movement) return null;
@@ -322,9 +372,17 @@ function parseCompound(text) {
 /**
  * 实时关键词检测（用于预渲染）
  * 在用户说话过程中检测关键词，触发视觉反馈
+ * 返回 { color, colorName, shape, size, position, hasDrawIntent }
+ *
+ * 只有检测到"绘制意图词"时 hasDrawIntent=true，才应触发预览生成。
+ * 避免"将三角形往上移动"等操作指令误触发绘制预览。
  */
 export function detectKeywords(text) {
-  const keywords = { color: null, colorName: null, shape: null, size: null };
+  const keywords = { color: null, colorName: null, shape: null, size: null, position: null, hasDrawIntent: false };
+
+  // 检测绘制意图（必须包含这些词才触发预览）
+  const drawIntentWords = ['画', '绘制', '绘画', '新建', '创建', '添加', '加一个', '来一个', '画一个', '来个', '整一个'];
+  keywords.hasDrawIntent = drawIntentWords.some((w) => text.includes(w));
 
   // 检测颜色
   for (const [name, hex] of Object.entries(COLOR_MAP)) {
@@ -335,13 +393,14 @@ export function detectKeywords(text) {
     }
   }
 
-  // 检测形状
-  const shapeMap = {
-    '圆': '圆形', '矩形': '矩形', '方形': '方形', '方块': '方块',
-    '直线': '直线', '线': '直线', '三角形': '三角形', '三角': '三角形',
-    '星': '星形', '星星': '星形', '椭圆': '椭圆',
-  };
-  for (const [key, value] of Object.entries(shapeMap)) {
+  // 检测形状（从长到短匹配，避免"三角"优先于"三角形"）
+  const shapeMap = [
+    ['三角形', '三角形'], ['矩形', '矩形'], ['椭圆形', '椭圆'], ['椭圆', '椭圆'],
+    ['方形', '方形'], ['方块', '方块'], ['直线', '直线'], ['三角', '三角形'],
+    ['星星', '星形'], ['星形', '星形'], ['圆形', '圆形'], ['圆', '圆形'],
+    ['线', '直线'], ['星', '星形'],
+  ];
+  for (const [key, value] of shapeMap) {
     if (text.includes(key)) {
       keywords.shape = value;
       break;
@@ -351,6 +410,10 @@ export function detectKeywords(text) {
   // 检测大小
   if (text.includes('大') || text.includes('放大')) keywords.size = 'large';
   else if (text.includes('小') || text.includes('缩小')) keywords.size = 'small';
+
+  // 检测位置（用于预览定位）
+  const position = parsePosition(text);
+  if (position) keywords.position = position;
 
   return keywords;
 }

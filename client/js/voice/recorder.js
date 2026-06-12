@@ -14,9 +14,17 @@ class VoiceRecorder {
     this.reconnectTimer = null;
     this.isConnecting = false;
     this.silenceTimer = null;
-    this.silenceThreshold = 1500; // 1.5秒无语音视为说完
+    this.silenceThreshold = 1500;
     this.onResult = null;       // (text, isFinal) => {}
     this.onStatusChange = null; // (status) => {}
+
+    // ---- 句子累积缓冲 ----
+    // Paraformer 可能把一句长指令切成多个 sentence_end=true 片段。
+    // 这里把连续片段在合并窗口内拼接，窗口到期后再作为最终命令执行。
+    // 全程对 app.js 透明：累积期间发 isFinal=false，到期才发 isFinal=true。
+    this._accumulatedText = '';
+    this._mergeTimer = null;
+    this._mergeWindowMs = 500; // 相邻句子片段之间的最大间隔（ms）
   }
 
   /**
@@ -147,6 +155,13 @@ class VoiceRecorder {
     // 通知后端停止 ASR
     this._send({ type: 'stop-asr' });
 
+    // 清理句子累积缓冲，避免停录后残留内容被误执行
+    this._accumulatedText = '';
+    if (this._mergeTimer) {
+      clearTimeout(this._mergeTimer);
+      this._mergeTimer = null;
+    }
+
     store.set('isListening', false);
     this.onStatusChange?.('stopped');
     console.log('[VoiceRecorder] Recording stopped');
@@ -188,38 +203,71 @@ class VoiceRecorder {
   }
 
   /**
-   * 处理 ASR 识别结果
+   * 处理 ASR 识别结果（含句子累积逻辑）
+   *
+   * Paraformer 有时会把一句长指令切成多个 sentence_end=true 片段。
+   * 处理策略：
+   *   - isFinal=false（中间结果）：拼上已累积前缀后发 false，供实时预览使用
+   *   - isFinal=true（句子结束）：追加到累积缓冲，重置合并窗口计时器，
+   *     发 false 继续更新预览；窗口到期后才发 true 触发命令执行
    */
   _handleASRResult(text, isFinal) {
     if (!text) return;
 
-    // 过滤空识别和纯标点符号
     const trimmed = text.trim();
     if (trimmed.length < 2) return;
-    // 过滤纯标点（如 "，"、"。"、"？"）
     if (/^[\s\p{P}]+$/u.test(trimmed)) return;
 
-    // 重置静音计时器
     this._resetSilenceTimer();
 
-    if (isFinal) {
-      store.set('finalTranscript', text);
-      this.onResult?.(text, true);
+    if (!isFinal) {
+      // 中间结果：拼上累积前缀，仅用于实时预览
+      const display = this._accumulatedText ? this._accumulatedText + trimmed : trimmed;
+      store.set('currentTranscript', display);
+      this.onResult?.(display, false);
     } else {
-      store.set('currentTranscript', text);
-      this.onResult?.(text, false);
+      // Paraformer 判定句子结束：去掉尾部标点后追加到缓冲
+      const clean = trimmed.replace(/[，。！？、,.!?\s]+$/, '');
+      if (!clean) return;
+
+      this._accumulatedText = this._accumulatedText ? this._accumulatedText + clean : clean;
+
+      // 以完整累积内容更新预览（仍为 false，不触发命令执行）
+      store.set('currentTranscript', this._accumulatedText);
+      this.onResult?.(this._accumulatedText, false);
+
+      // 重置合并窗口：窗口内如果又来了新片段会再次延迟
+      this._resetMergeTimer();
     }
   }
 
   /**
-   * 静音检测计时器
+   * 重置句子合并窗口计时器
+   */
+  _resetMergeTimer() {
+    if (this._mergeTimer) clearTimeout(this._mergeTimer);
+    this._mergeTimer = setTimeout(() => this._fireMergedCommand(), this._mergeWindowMs);
+  }
+
+  /**
+   * 合并窗口到期：将累积文本作为最终命令发出
+   */
+  _fireMergedCommand() {
+    const text = this._accumulatedText;
+    this._accumulatedText = '';
+    this._mergeTimer = null;
+    if (!text) return;
+
+    store.set('finalTranscript', text);
+    this.onResult?.(text, true);
+  }
+
+  /**
+   * 静音检测计时器（保留原有接口，Paraformer 侧已处理静音）
    */
   _resetSilenceTimer() {
     if (this.silenceTimer) clearTimeout(this.silenceTimer);
-    this.silenceTimer = setTimeout(() => {
-      // 静音超时，视为用户说完
-      // 这里不需要额外处理，ASR 服务端会自动结束
-    }, this.silenceThreshold);
+    this.silenceTimer = setTimeout(() => {}, this.silenceThreshold);
   }
 
   /**
