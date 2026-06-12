@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>声绘 VoiceDraw - 纯语音智能绘图助手</title>
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部状态栏 -->
+    <header id="topBar">
+      <div class="logo">
+        <span class="logo-icon">🎙️</span>
+        <span class="logo-text">声绘 VoiceDraw</span>
+      </div>
+      <div class="status-area">
+        <div class="status-indicator">
+          <span id="micStatus" class="status-dot status-connecting"></span>
+          <span id="micStatusText" class="status-text">连接中...</span>
+        </div>
+        <button id="helpBtn" class="btn-help" title="帮助">❓ 帮助</button>
+      </div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main id="mainContent">
+      <!-- 画布区域 -->
+      <div id="canvasContainer">
+        <canvas id="mainCanvas"></canvas>
+        <!-- 任务瀑布流 -->
+        <div id="taskList" class="task-list"></div>
+      </div>
+
+      <!-- 帮助面板（浮层） -->
+      <div id="helpPanel" class="help-panel">
+        <div class="help-header">
+          <h3>支持的语音指令</h3>
+          <button id="closeHelp" class="btn-close">✕</button>
+        </div>
+        <div class="help-content">
+          <div class="help-section">
+            <h4>🎨 图形绘制</h4>
+            <p>"画一个圆" / "画一个红色的矩形" / "在左上角画一个三角形"</p>
+          </div>
+          <div class="help-section">
+            <h4>🎯 对象选择</h4>
+            <p>"选中3号" / "选中左上角的圆"</p>
+          </div>
+          <div class="help-section">
+            <h4>🖌️ 颜色修改</h4>
+            <p>"改成红色" / "设置颜色为蓝色"</p>
+          </div>
+          <div class="help-section">
+            <h4>📐 大小调整</h4>
+            <p>"放大" / "缩小" / "再大一点"</p>
+          </div>
+          <div class="help-section">
+            <h4>📍 位置移动</h4>
+            <p>"往左移一点" / "移到右上角" / "再左一点"</p>
+          </div>
+          <div class="help-section">
+            <h4>⌨️ 画布操作</h4>
+            <p>"清除画布" / "撤销" / "重做"</p>
+          </div>
+          <div class="help-section">
+            <h4>✅ 确认/取消</h4>
+            <p>"确认" / "取消"</p>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- 底部控制区 -->
+    <footer id="bottomBar">
+      <div id="waveformContainer">
+        <canvas id="waveformCanvas"></canvas>
+      </div>
+      <div id="transcriptArea">
+        <div class="transcript-label">识别文本：</div>
+        <div id="transcript" class="transcript-text">等待语音输入...</div>
+      </div>
+      <div id="quickHints" class="quick-hints">
+        <span class="hint-tag">画一个圆</span>
+        <span class="hint-tag">改成红色</span>
+        <span class="hint-tag">往左移</span>
+        <span class="hint-tag">放大</span>
+        <span class="hint-tag">撤销</span>
+        <span class="hint-tag">帮助</span>
+      </div>
+    </footer>
+
+    <!-- Toast 消息容器 -->
+    <div id="toastContainer" class="toast-container"></div>
+  </div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
