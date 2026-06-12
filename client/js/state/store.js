@@ -147,6 +147,19 @@ class Store {
   }
 
   /**
+   * 替换图形对象（用于形状变更）
+   * 保留 id，替换整个对象属性
+   */
+  replaceObject(id, newObj) {
+    this.pushHistory();
+    const idx = this._state.objects.findIndex((o) => o.id === id);
+    if (idx !== -1) {
+      this._state.objects[idx] = newObj;
+      this.set('objects', [...this._state.objects]);
+    }
+  }
+
+  /**
    * 获取选中对象
    */
   getSelected() {

@@ -324,7 +324,11 @@ function parseCompound(text) {
  * 在用户说话过程中检测关键词，触发视觉反馈
  */
 export function detectKeywords(text) {
-  const keywords = { color: null, colorName: null, shape: null, size: null };
+  const keywords = { color: null, colorName: null, shape: null, size: null, position: null, isDrawIntent: false };
+
+  // 检测绘制意图（"画/绘画/绘制/画一个/画一个...的"）
+  const drawIntentWords = ['画', '绘画', '绘制', '添加', '新增', '创建'];
+  keywords.isDrawIntent = drawIntentWords.some((w) => text.includes(w));
 
   // 检测颜色
   for (const [name, hex] of Object.entries(COLOR_MAP)) {
@@ -351,6 +355,10 @@ export function detectKeywords(text) {
   // 检测大小
   if (text.includes('大') || text.includes('放大')) keywords.size = 'large';
   else if (text.includes('小') || text.includes('缩小')) keywords.size = 'small';
+
+  // 检测位置
+  const pos = parsePosition(text);
+  if (pos) keywords.position = pos;
 
   return keywords;
 }

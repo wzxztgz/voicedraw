@@ -115,20 +115,21 @@ class VoiceDrawApp {
       const keywords = detectKeywords(text);
       store.set('detectedKeywords', keywords);
 
-      console.log('[Preview] text:', text, 'shape:', keywords.shape, 'color:', keywords.colorName, 'hasPreview:', !!store.state.preview);
-
-      // 只要有任何有效关键词（形状/颜色/位置/大小），就生成或更新预览
       const hasAnyKeyword = keywords.shape || keywords.color || keywords.position || keywords.size;
+      const hasSelectedObj = store.state.selectedId !== null;
 
-      if (hasAnyKeyword && !store.state.preview) {
-        // 首次检测到关键词，生成预览（形状默认圆形）
-        console.log('[Preview] Generating preview');
-        this._generatePreview(keywords);
-      } else if (store.state.preview && hasAnyKeyword) {
-        // 已有预览，更新参数
-        console.log('[Preview] Updating preview');
-        this._updatePreview(keywords);
+      if (keywords.isDrawIntent) {
+        // 有绘制意图 → 生成/更新预览（创建新图形）
+        if (hasAnyKeyword && !store.state.preview) {
+          this._generatePreview(keywords);
+        } else if (store.state.preview && hasAnyKeyword) {
+          this._updatePreview(keywords);
+        }
+      } else if (!keywords.isDrawIntent && hasSelectedObj && hasAnyKeyword) {
+        // 无绘制意图 + 有选中对象 → 直接修改选中对象（不生成预览）
+        this._applyKeywordsToSelected(keywords);
       }
+      // 其他情况：无绘制意图且无选中对象，等待最终结果处理
 
       return;
     }
@@ -191,6 +192,56 @@ class VoiceDrawApp {
   }
 
   /**
+   * 实时修改选中对象属性（不生成预览）
+   * 用于"改为蓝色"、"放大"等修改指令
+   */
+  _applyKeywordsToSelected(keywords) {
+    const obj = store.getObjectById(store.state.selectedId);
+    if (!obj) return;
+
+    // 形状变更：需要重建对象（不同形状属性结构不同）
+    if (keywords.shape) {
+      const newType = this._getShapeType(keywords.shape);
+      if (newType !== obj.type) {
+        const newObj = createShape(newType, {
+          x: obj.x,
+          y: obj.y,
+          color: keywords.color || obj.color,
+        });
+        // 保留 id 和 selected 状态
+        newObj.id = obj.id;
+        store.replaceObject(obj.id, newObj);
+        return;
+      }
+    }
+
+    const updates = {};
+
+    if (keywords.color && keywords.color !== obj.color) {
+      updates.color = keywords.color;
+    }
+
+    if (keywords.size) {
+      if (keywords.size === 'large') {
+        Object.assign(updates, { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 });
+      } else if (keywords.size === 'small') {
+        Object.assign(updates, { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 });
+      }
+    }
+
+    if (keywords.position) {
+      const { canvasWidth: W, canvasHeight: H } = store.state;
+      const coords = positionToCoords(keywords.position, W, H);
+      updates.x = coords.x;
+      updates.y = coords.y;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      store.updateObject(obj.id, updates);
+    }
+  }
+
+  /**
    * 更新预览参数
    * 支持动态更新形状、颜色、位置、大小
    */
@@ -199,10 +250,8 @@ class VoiceDrawApp {
     if (!preview) return;
 
     // 检查形状是否变化（只有明确检测到新形状时才切换）
-    console.log('[Preview] Update check - keywords.shape:', keywords.shape, 'preview.type:', preview.type);
     if (keywords.shape) {
       const newShapeType = this._getShapeType(keywords.shape);
-      console.log('[Preview] newShapeType:', newShapeType, 'current:', preview.type, 'diff:', newShapeType !== preview.type);
       if (newShapeType !== preview.type) {
       // 形状变化，重新创建预览对象，保留位置/颜色/大小
       const { x, y, color } = preview;
