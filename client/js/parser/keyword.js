@@ -191,13 +191,31 @@ function extractNumber(text) {
 }
 
 /**
+ * 从操作指令文本中提取目标对象（"将1号…" / "把三号…"）
+ * 返回 { type: 'id', value: n } 或 null（未指定，使用当前选中）
+ */
+function extractTarget(text) {
+  const num = extractNumber(text);
+  if (num !== null) return { type: 'id', value: num };
+  return null;
+}
+
+/**
  * 解析选中指令
  */
 function parseSelect(text) {
   // "选中3号" / "选中三号" / "第2个" / "第二个"
   const num = extractNumber(text);
   if (num !== null) {
-    return { type: 'select', target: { type: 'id', value: num } };
+    const hasSelectVerb = text.includes('选中') || text.includes('选择') || text.includes('点击');
+    // 含有操作动词（移/改/放大等）但无选中词 → 这是针对目标的操作指令，不是选中指令
+    // 交给 parseMove / parseColorChange / parseSizeChange 处理（它们会通过 extractTarget 获取目标）
+    const hasActionVerb = ['移', '放大', '缩小', '变大', '变小', '改成', '变成', '换成', '调成'].some((v) => text.includes(v));
+    if (hasActionVerb && !hasSelectVerb) {
+      // 不拦截，让操作解析器处理
+    } else {
+      return { type: 'select', target: { type: 'id', value: num } };
+    }
   }
 
   // "选中红色的圆"
@@ -248,7 +266,7 @@ function parseColorChange(text) {
 
   if (!color) return null;
 
-  return { type: 'color', color, colorName };
+  return { type: 'color', color, colorName, target: extractTarget(text) };
 }
 
 /**
@@ -283,7 +301,7 @@ function parseSizeChange(text) {
     }
   }
 
-  return { type: 'resize', factor };
+  return { type: 'resize', factor, target: extractTarget(text) };
 }
 
 /**
@@ -292,11 +310,13 @@ function parseSizeChange(text) {
  * "向/往X移一点" → 相对位移 (move)
  */
 function parseMove(text) {
+  const target = extractTarget(text);
+
   // 绝对位置移动："移到右上角" / "移动到中间"
   const isAbsolute = text.includes('移到') || text.includes('移动到');
   if (isAbsolute) {
     const position = parsePosition(text);
-    if (position) return { type: 'moveTo', position };
+    if (position) return { type: 'moveTo', position, target };
     return null;
   }
 
@@ -306,7 +326,7 @@ function parseMove(text) {
   const movement = parseMovement(text);
   if (!movement) return null;
 
-  return { type: 'move', ...movement };
+  return { type: 'move', ...movement, target };
 }
 
 /**

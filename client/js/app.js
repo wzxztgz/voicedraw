@@ -472,23 +472,15 @@ class VoiceDrawApp {
   }
 
   _execColor(command) {
-    const obj = store.getSelected();
-    if (!obj) {
-      voiceSynth.speak('请先选中一个对象');
-      this.toast.warning('请先选中一个对象');
-      return null;
-    }
+    const obj = this._resolveTarget(command);
+    if (!obj) return null;
     store.updateObject(obj.id, { color: command.color });
     return obj;
   }
 
   _execResize(command) {
-    const obj = store.getSelected();
-    if (!obj) {
-      voiceSynth.speak('请先选中一个对象');
-      this.toast.warning('请先选中一个对象');
-      return null;
-    }
+    const obj = this._resolveTarget(command);
+    if (!obj) return null;
 
     const updates = {};
     if (obj.radius) updates.radius = Math.max(10, obj.radius * command.factor);
@@ -523,12 +515,8 @@ class VoiceDrawApp {
   }
 
   _execMove(command) {
-    const obj = store.getSelected();
-    if (!obj) {
-      voiceSynth.speak('请先选中一个对象');
-      this.toast.warning('请先选中一个对象');
-      return null;
-    }
+    const obj = this._resolveTarget(command);
+    if (!obj) return null;
 
     if (command.dx !== undefined) {
       // 方向移动（相对）
@@ -543,12 +531,8 @@ class VoiceDrawApp {
   }
 
   _execMoveTo(command) {
-    const obj = store.getSelected();
-    if (!obj) {
-      voiceSynth.speak('请先选中一个对象');
-      this.toast.warning('请先选中一个对象');
-      return null;
-    }
+    const obj = this._resolveTarget(command);
+    if (!obj) return null;
 
     // 绝对位置移动
     const { canvasWidth: W, canvasHeight: H } = store.state;
@@ -644,6 +628,34 @@ class VoiceDrawApp {
   }
 
   // ========== 辅助方法 ==========
+
+  /**
+   * 解析指令中的目标对象（隐式选中）
+   * - command.target 有值 → 按 ID 查找并自动选中
+   * - command.target 无值 → 返回当前已选中对象
+   * - 找不到 → 给出提示并返回 null
+   */
+  _resolveTarget(command) {
+    if (command.target && command.target.type === 'id') {
+      const obj = store.getObjectByNumber(command.target.value);
+      if (!obj) {
+        const msg = `没有找到 ${command.target.value} 号对象`;
+        voiceSynth.speak(msg);
+        this.toast.warning(msg);
+        return null;
+      }
+      store.selectObject(obj.id);
+      this.toast.info(`已选中 ${obj.id} 号`, 1200);
+      return obj;
+    }
+    // 没有指定目标，使用当前选中
+    const selected = store.getSelected();
+    if (!selected) {
+      voiceSynth.speak('请先选中一个对象');
+      this.toast.warning('请先选中一个对象');
+    }
+    return selected;
+  }
 
   _commandToDescription(command) {
     const shapeName = SHAPE_NAMES[command.shape] || '';
