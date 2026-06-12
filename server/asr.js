@@ -141,11 +141,8 @@ class DashScopeASR {
 
             const sentence = output.sentence;
             if (sentence) {
-              const text = (sentence.text || '').trim();
-              // 过滤空识别和纯标点
-              if (text.length < 2 || /^[\s\p{P}]+$/u.test(text)) return;
-
-              // 判断是否为最终结果(!text) return;
+              const text = sentence.text || '';
+              if (!text) return;
 
               // 判断是否为最终结果
               // 阿里云 Paraformer 使用 sentence_end 字段标记句子是否结束

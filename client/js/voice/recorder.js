@@ -193,12 +193,6 @@ class VoiceRecorder {
   _handleASRResult(text, isFinal) {
     if (!text) return;
 
-    // 过滤空识别和纯标点符号
-    const trimmed = text.trim();
-    if (trimmed.length < 2) return;
-    // 过滤纯标点（如 "，"、"。"、"？"）
-    if (/^[\s\p{P}]+$/u.test(trimmed)) return;
-
     // 重置静音计时器
     this._resetSilenceTimer();
 
