@@ -123,6 +123,34 @@ class Store {
   }
 
   /**
+   * 批量添加图形对象（LLM 图表/流程图用）
+   * 整批作为一次历史记录，支持一次性撤销整张图。
+   *
+   * ID 分配顺序：可交互对象（柱子/节点/数据点）优先获得连续编号，
+   * 系统装饰元素（坐标轴、标签、标题）排在后面，避免浪费用户可见的 ID。
+   * 例如柱状图 3 根柱子在空画布上会得到 1、2、3 号。
+   */
+  addBatch(shapes) {
+    this.pushHistory();
+    // 可交互对象优先，系统装饰元素排后
+    const interactive = shapes.filter((s) => !s._system && s.type !== 'text');
+    const decorative  = shapes.filter((s) =>  s._system || s.type === 'text');
+    const ordered = [...interactive, ...decorative];
+
+    const added = [];
+    for (const shape of ordered) {
+      const obj = { id: this._state.nextId++, ...shape };
+      this._state.objects.push(obj);
+      added.push(obj);
+    }
+    this.set('objects', [...this._state.objects]);
+    // 选中第一个可交互对象
+    const first = added.find((o) => !o._system && o.type !== 'text');
+    if (first) this.set('selectedId', first.id);
+    return added;
+  }
+
+  /**
    * 更新图形对象
    */
   updateObject(id, updates) {

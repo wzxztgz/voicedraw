@@ -41,6 +41,11 @@ export function parseCommand(text) {
 
   console.log(`[Parser] 原始: "${original}" → 纠正: "${text}"`);
 
+  // 0. LLM 复杂图形意图检测（图表/流程图/思维导图/复杂图形）
+  //    满足条件就跳过后续所有硬解析，直接交给 LLM 处理
+  const llmResult = parseLLMIntent(text, original);
+  if (llmResult) return llmResult;
+
   // 1. 帮助指令
   if (text.includes('帮助') || text.includes('我能说什么') || text.includes('怎么用') || text.includes('指令')) {
     return { type: 'help' };
@@ -410,6 +415,27 @@ function parseCompound(text) {
     type: 'compound',
     tasks: subTasks,
   };
+}
+
+/**
+ * LLM 意图检测
+ * 当指令中同时包含「绘制动词」和「复杂图形关键词」时，交由 LLM 解析
+ * 使用原始文本（含标点、大小写）作为 prompt，提高 LLM 理解质量
+ */
+function parseLLMIntent(text, original) {
+  const llmShapes = [
+    '柱状图', '折线图', '饼图', '条形图', '曲线图', '趋势图',
+    '流程图', '流程',            // "请假审批流程" 不带"图"字也能命中
+    '思维导图', '脑图', '导图',
+    '房子', '树', '花', '汽车', '地图',
+  ];
+  const drawVerbs = ['画', '绘制', '生成', '创建', '新建', '做个', '来一个', '整一个', '帮我画'];
+  const hasLLMShape = llmShapes.some((k) => text.includes(k));
+  const hasDrawVerb = drawVerbs.some((v) => text.includes(v));
+  if (hasLLMShape && hasDrawVerb) {
+    return { type: 'llm-draw', prompt: original || text };
+  }
+  return null;
 }
 
 /**

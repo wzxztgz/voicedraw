@@ -14,6 +14,8 @@ import voiceSynth from './voice/synthesizer.js';
 import { WaveformVisualizer } from './ui/waveform.js';
 import { TaskListUI } from './ui/tasklist.js';
 import Toast from './ui/toast.js';
+import { renderBarChart, renderLineChart, renderPieChart } from './canvas/charts.js';
+import { renderFlowchart, renderMindmap } from './canvas/flowchart.js';
 
 class VoiceDrawApp {
   constructor() {
@@ -370,6 +372,11 @@ class VoiceDrawApp {
         result = this._execRefine(command);
         break;
 
+      case 'llm-draw':
+        // LLM 绘图是异步流程，回调中处理，这里直接返回避免后续同步逻辑干扰
+        this._execLLMDraw(command);
+        return;
+
       case 'unknown':
         store.cancelPreview();
         feedback = contextManager.generateClarification(command.text || originalText);
@@ -655,6 +662,80 @@ class VoiceDrawApp {
       default:
         return null;
     }
+  }
+
+  // ========== LLM 图形生成 ==========
+
+  /**
+   * 触发 LLM 绘图请求
+   * 1. 立即显示 "正在生成..." 提示
+   * 2. 通过 WebSocket 发到后端 → 通义千问解析
+   * 3. 结果回来后调用 _renderLLMResult 渲染到画布
+   */
+  _execLLMDraw(command) {
+    store.cancelPreview();
+    this.toast.show('⏳ 正在生成图形，请稍候...', 'info', 15000);
+
+    // 挂载一次性回调（防止多次触发）
+    voiceRecorder.onLLMResult = (data) => {
+      voiceRecorder.onLLMResult = null;
+      voiceRecorder.onLLMError = null;
+      this._renderLLMResult(data);
+    };
+    voiceRecorder.onLLMError = (err) => {
+      voiceRecorder.onLLMResult = null;
+      voiceRecorder.onLLMError = null;
+      const msg = `生成失败: ${err}`;
+      console.error('[VoiceDraw] LLM error:', err);
+      voiceSynth.speak('图形生成失败，请重试');
+      this.toast.error(msg, 4000);
+    };
+
+    voiceRecorder.sendLLMDraw(command.prompt);
+  }
+
+  /**
+   * 将 LLM 返回的配置 JSON 渲染为画布图形
+   */
+  _renderLLMResult(data) {
+    const { canvasWidth: W, canvasHeight: H } = store.state;
+    const typeNames = { bar: '柱状图', line: '折线图', pie: '饼图', flowchart: '流程图', mindmap: '思维导图' };
+    let shapes = [];
+
+    try {
+      switch (data.drawType) {
+        case 'bar':
+          shapes = renderBarChart(data, W, H);
+          break;
+        case 'line':
+          shapes = renderLineChart(data, W, H);
+          break;
+        case 'pie':
+          shapes = renderPieChart(data, W, H);
+          break;
+        case 'flowchart':
+          shapes = renderFlowchart(data, W, H);
+          break;
+        case 'mindmap':
+          shapes = renderMindmap(data, W, H);
+          break;
+        default:
+          this.toast.warning(`暂不支持图形类型: ${data.drawType}`, 3000);
+          return;
+      }
+    } catch (e) {
+      console.error('[VoiceDraw] Render error:', e);
+      this.toast.error(`渲染出错: ${e.message}`, 4000);
+      return;
+    }
+
+    // 批量写入 store（一次性撤销）
+    const added = store.addBatch(shapes);
+    const interactive = added.filter((o) => !o._system && o.type !== 'text');
+    const typeName = typeNames[data.drawType] || '图形';
+    const msg = `✅ 已生成${typeName}，${interactive.length} 个可编辑对象`;
+    voiceSynth.speak(`已生成${typeName}`);
+    this.toast.success(msg, 3000);
   }
 
   // ========== 辅助方法 ==========

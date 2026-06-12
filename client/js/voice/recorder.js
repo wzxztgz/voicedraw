@@ -197,6 +197,14 @@ class VoiceRecorder {
       case 'pong':
         break;
 
+      case 'llm-result':
+        this.onLLMResult?.(msg.data);
+        break;
+
+      case 'llm-error':
+        this.onLLMError?.(msg.error);
+        break;
+
       default:
         console.log('[VoiceRecorder] Unknown message:', msg.type);
     }
@@ -289,6 +297,14 @@ class VoiceRecorder {
       binary += String.fromCharCode(bytes[i]);
     }
     return btoa(binary);
+  }
+
+  /**
+   * 发送 LLM 绘图请求到后端
+   * @param {string} prompt - 用户语音指令原文
+   */
+  sendLLMDraw(prompt) {
+    this._send({ type: 'llm-draw', prompt });
   }
 
   /**

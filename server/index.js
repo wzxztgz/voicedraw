@@ -169,6 +169,21 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'llm-draw': {
+          // 调用通义千问将自然语言转化为绘图配置 JSON
+          console.log(`[Server] LLM draw request from ${clientId}: ${msg.prompt}`);
+          try {
+            const LLMService = require('./llmService');
+            const llm = new LLMService({ apiKey: process.env.DASHSCOPE_API_KEY });
+            const result = await llm.generate(msg.prompt);
+            sendToClient(ws, 'llm-result', { data: result });
+          } catch (err) {
+            console.error('[Server] LLM error:', err.message);
+            sendToClient(ws, 'llm-error', { error: err.message });
+          }
+          break;
+        }
+
         default:
           console.log(`[Server] Unknown message type: ${msg.type}`);
       }

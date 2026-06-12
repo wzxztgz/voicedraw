@@ -11,12 +11,16 @@
  */
 export function createShape(type, options = {}) {
   const defaults = {
-    circle: { type: 'circle', x: 400, y: 300, radius: 50, color: '#FF6B6B', lineWidth: 2 },
-    rect: { type: 'rect', x: 350, y: 250, width: 100, height: 80, color: '#4ECDC4', lineWidth: 2 },
-    line: { type: 'line', x: 300, y: 300, x2: 500, y2: 300, color: '#45B7D1', lineWidth: 3 },
+    circle:   { type: 'circle',   x: 400, y: 300, radius: 50, color: '#FF6B6B', lineWidth: 2 },
+    rect:     { type: 'rect',     x: 350, y: 250, width: 100, height: 80, color: '#4ECDC4', lineWidth: 2 },
+    line:     { type: 'line',     x: 300, y: 300, x2: 500, y2: 300, color: '#45B7D1', lineWidth: 3 },
     triangle: { type: 'triangle', x: 400, y: 250, size: 60, color: '#96CEB4', lineWidth: 2 },
-    star: { type: 'star', x: 400, y: 300, size: 40, color: '#FFEAA7', lineWidth: 2 },
-    ellipse: { type: 'ellipse', x: 400, y: 300, rx: 80, ry: 50, color: '#DDA0DD', lineWidth: 2 },
+    star:     { type: 'star',     x: 400, y: 300, size: 40, color: '#FFEAA7', lineWidth: 2 },
+    ellipse:  { type: 'ellipse',  x: 400, y: 300, rx: 80, ry: 50, color: '#DDA0DD', lineWidth: 2 },
+    // ── LLM 图形新增类型 ──────────────────────────────────
+    text:     { type: 'text',     x: 400, y: 300, content: '', fontSize: 14, color: '#333333', textAlign: 'center' },
+    arc:      { type: 'arc',      x: 400, y: 300, radius: 120, startAngle: 0, endAngle: Math.PI, color: '#45B7D1', lineWidth: 2 },
+    diamond:  { type: 'diamond',  x: 400, y: 300, width: 120, height: 60, color: '#FFEAA7', lineWidth: 2 },
   };
 
   const base = defaults[type] || defaults.circle;
@@ -74,6 +78,15 @@ export function drawShape(ctx, shape, isPreview = false) {
       break;
     case 'ellipse':
       drawEllipse(ctx, shape);
+      break;
+    case 'text':
+      drawText(ctx, shape);
+      break;
+    case 'arc':
+      drawArc(ctx, shape);
+      break;
+    case 'diamond':
+      drawDiamond(ctx, shape);
       break;
     default:
       drawCircle(ctx, shape);
@@ -151,6 +164,44 @@ function drawEllipse(ctx, shape) {
   ctx.stroke();
 }
 
+function drawText(ctx, shape) {
+  const { x, y, content, fontSize, color, textAlign } = shape;
+  ctx.save();
+  ctx.font = `${fontSize || 14}px "Noto Sans SC", sans-serif`;
+  ctx.fillStyle = color || '#333333';
+  ctx.textAlign = textAlign || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(content || '', x, y);
+  ctx.restore();
+}
+
+function drawArc(ctx, shape) {
+  const { x, y, radius, startAngle, endAngle, color } = shape;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.arc(x, y, radius, startAngle, endAngle);
+  ctx.closePath();
+  ctx.fillStyle = color + 'bb';
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+function drawDiamond(ctx, shape) {
+  const { x, y, width, height, color } = shape;
+  const hw = width / 2, hh = height / 2;
+  ctx.beginPath();
+  ctx.moveTo(x, y - hh);
+  ctx.lineTo(x + hw, y);
+  ctx.lineTo(x, y + hh);
+  ctx.lineTo(x - hw, y);
+  ctx.closePath();
+  ctx.fillStyle = color + '33';
+  ctx.fill();
+  ctx.stroke();
+}
+
 /**
  * 绘制选中高亮边框
  */
@@ -168,8 +219,16 @@ export function drawSelection(ctx, shape) {
 
 /**
  * 绘制序号标签
+ * - _system: true → 不显示（坐标轴、装饰文字等）
+ * - _barLabel → 在图形下方显示数据标签（柱子、折线点）
+ * - _nodeText → 节点文字已由 sysText 覆盖，不重复显示 ID
  */
 export function drawLabel(ctx, shape) {
+  // 系统装饰元素：不显示序号
+  if (shape._system) return;
+  // text 类型本身即为文字，不需要 ID 徽章
+  if (shape.type === 'text') return;
+
   ctx.save();
   const labelX = shape.x || (shape.x + shape.x2) / 2;
   const labelY = getShapeBounds(shape).y - 12;
@@ -178,7 +237,6 @@ export function drawLabel(ctx, shape) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
 
-  // 背景
   const text = `${shape.id}`;
   const metrics = ctx.measureText(text);
   const tw = metrics.width + 8;
@@ -189,7 +247,6 @@ export function drawLabel(ctx, shape) {
   ctx.roundRect(labelX - tw / 2, labelY - th, tw, th, 4);
   ctx.fill();
 
-  // 文字
   ctx.fillStyle = '#fff';
   ctx.fillText(text, labelX, labelY - 3);
   ctx.restore();
@@ -219,6 +276,12 @@ export function getShapeBounds(shape) {
       return { x: shape.x - shape.size, y: shape.y - shape.size, w: shape.size * 2, h: shape.size * 2 };
     case 'ellipse':
       return { x: shape.x - shape.rx, y: shape.y - shape.ry, w: shape.rx * 2, h: shape.ry * 2 };
+    case 'text':
+      return { x: shape.x - 60, y: shape.y - 10, w: 120, h: 20 };
+    case 'arc':
+      return { x: shape.x - shape.radius, y: shape.y - shape.radius, w: shape.radius * 2, h: shape.radius * 2 };
+    case 'diamond':
+      return { x: shape.x - shape.width / 2, y: shape.y - shape.height / 2, w: shape.width, h: shape.height };
     default:
       return { x: shape.x - 30, y: shape.y - 30, w: 60, h: 60 };
   }
@@ -234,6 +297,9 @@ export const SHAPE_NAMES = {
   triangle: '三角形',
   star: '星形',
   ellipse: '椭圆',
+  text: '文字',
+  arc: '扇形',
+  diamond: '菱形',
 };
 
 /**
