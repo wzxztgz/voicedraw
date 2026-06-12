@@ -31,6 +31,7 @@ function getASR() {
       apiKey: process.env.DASHSCOPE_API_KEY,
       model: process.env.ASR_MODEL || 'paraformer-realtime-v2',
       sampleRate: parseInt(process.env.AUDIO_SAMPLE_RATE) || 16000,
+      maxSentenceSilence: parseInt(process.env.ASR_SILENCE_MS) || 1500,
     });
   }
   return asrInstance;

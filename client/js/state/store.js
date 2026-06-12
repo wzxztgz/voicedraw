@@ -202,6 +202,7 @@ class Store {
     this._state.redoStack.push(current);
     const prev = this._state.history.pop();
     this._state.objects = prev;
+    this._state.nextId = prev.length > 0 ? Math.max(...prev.map((o) => o.id)) + 1 : 1;
     this.set('objects', [...this._state.objects]);
     return true;
   }
@@ -215,6 +216,7 @@ class Store {
     this._state.history.push(current);
     const next = this._state.redoStack.pop();
     this._state.objects = next;
+    this._state.nextId = next.length > 0 ? Math.max(...next.map((o) => o.id)) + 1 : 1;
     this.set('objects', [...this._state.objects]);
     return true;
   }
@@ -225,9 +227,22 @@ class Store {
   clearCanvas() {
     this.pushHistory();
     this._state.objects = [];
+    this._state.nextId = 1;
     this.set('objects', []);
     this.set('selectedId', null);
     this.set('preview', null);
+  }
+
+  /**
+   * 替换图形对象（用于形状变更）
+   */
+  replaceObject(id, newObj) {
+    this.pushHistory();
+    const idx = this._state.objects.findIndex((o) => o.id === id);
+    if (idx !== -1) {
+      this._state.objects[idx] = { ...newObj, id };
+      this.set('objects', [...this._state.objects]);
+    }
   }
 
   /**

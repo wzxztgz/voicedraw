@@ -23,10 +23,6 @@ class VoiceDrawApp {
     this.toast = null;
     this.isProcessing = false;
     this.previewTimeout = null;
-    // 句子累积缓冲（处理 ASR VAD 在停顿处切割句子的问题）
-    this.sentenceBuffer = '';
-    this.bufferFlushTimer = null;
-    this.BUFFER_WINDOW = 1500; // 缓冲窗口 1.5 秒
   }
 
   /**
@@ -107,142 +103,68 @@ class VoiceDrawApp {
   _onASRResult(text, isFinal) {
     if (!text || !text.trim()) return;
 
-    const transcriptEl = document.getElementById('transcript');
-
-    if (!isFinal) {
-      // 非最终结果：显示"已缓冲 + 当前实时"，用完整上下文做关键词检测
-      const fullContext = this.sentenceBuffer ? this.sentenceBuffer + text : text;
-
-      if (transcriptEl) {
-        transcriptEl.textContent = fullContext;
-        transcriptEl.classList.remove('final');
-      }
-
-      const keywords = detectKeywords(fullContext);
-      store.set('detectedKeywords', keywords);
-
-      const hasAnyKeyword = keywords.shape || keywords.color || keywords.position || keywords.size;
-      if (keywords.hasDrawIntent && hasAnyKeyword && !store.state.preview) {
-        this._generatePreview(keywords);
-      } else if (store.state.preview && hasAnyKeyword) {
-        this._updatePreview(keywords);
-      }
-      return;
-    }
-
-    // 最终结果 → 交给句子缓冲处理
-    this._handleFinalSentence(text);
-  }
-
-  /**
-   * 处理一条最终句子（ASR sentence_end=true）
-   * 核心逻辑：累积句子 → 完整指令立即执行，否则等缓冲窗口后再执行
-   */
-  _handleFinalSentence(text) {
-    // 暂停预览自动确认计时器，避免缓冲期间误触发
-    if (this.previewTimeout) {
-      clearTimeout(this.previewTimeout);
-      this.previewTimeout = null;
-    }
-
-    // 拼接到缓冲区
-    const accumulated = (this.sentenceBuffer + text).trim();
-    this.sentenceBuffer = accumulated;
-
+    // 更新实时文本显示
     const transcriptEl = document.getElementById('transcript');
     if (transcriptEl) {
-      transcriptEl.textContent = accumulated;
-      transcriptEl.classList.add('final');
+      transcriptEl.textContent = text;
+      transcriptEl.classList.toggle('final', isFinal);
     }
 
-    // 完整指令 → 立即执行，无需等待窗口
-    if (this._isCompleteCommand(accumulated)) {
-      this._flushBuffer();
+    if (!isFinal) {
+      // 实时关键词检测 → 触发预渲染
+      const keywords = detectKeywords(text);
+      store.set('detectedKeywords', keywords);
+
+      // 必须有绘制意图词（画/绘制/创建…）才触发预览，避免"移动三角形"等误触发
+      const hasAnyKeyword = keywords.shape || keywords.color || keywords.position || keywords.size;
+
+      if (keywords.hasDrawIntent && hasAnyKeyword && !store.state.preview) {
+        // 首次检测到关键词且有绘制意图，生成预览
+        this._generatePreview(keywords);
+      } else if (store.state.preview && hasAnyKeyword) {
+        // 已有预览（说明绘制意图已确认），继续更新参数
+        this._updatePreview(keywords);
+      }
+
       return;
     }
 
-    // 不完整 → 启动/重置缓冲窗口计时器
-    if (this.bufferFlushTimer) clearTimeout(this.bufferFlushTimer);
-    this.bufferFlushTimer = setTimeout(() => this._flushBuffer(), this.BUFFER_WINDOW);
+    // 最终结果 → 解析并执行指令
+    this._processCommand(text);
   }
 
   /**
-   * 刷新缓冲区：执行累积文本并清空
+   * 中文形状名 → 图形类型 ID
    */
-  _flushBuffer() {
-    if (this.bufferFlushTimer) {
-      clearTimeout(this.bufferFlushTimer);
-      this.bufferFlushTimer = null;
-    }
-    const text = this.sentenceBuffer.trim();
-    this.sentenceBuffer = '';
-    if (text) {
-      this._processCommand(text);
-    }
+  _getShapeType(shapeName) {
+    const map = {
+      '圆形': 'circle', '方形': 'rect', '矩形': 'rect', '方块': 'rect',
+      '直线': 'line', '三角形': 'triangle',
+      '星形': 'star', '椭圆': 'ellipse', '椭圆形': 'ellipse',
+    };
+    return map[shapeName] || 'circle';
   }
 
   /**
-   * 判断文本是否构成完整指令（有对应动词 + 宾语/目标）
-   * 完整 → 立即执行；不完整 → 等缓冲窗口，期待后续补充
-   */
-  _isCompleteCommand(text) {
-    const t = text.trim();
-
-    // 即时单句指令（无需宾语）
-    const instant = ['确认', '好的', '对', '是的', '没错', '取消', '不要', '算了', '不对',
-      '撤销', '撤回', '上一步', '重做', '恢复', '帮助', '清除', '清空', '全部删除', '重新开始'];
-    if (instant.some((w) => t.includes(w))) return true;
-
-    // 绘制：绘制动词 + 形状词
-    const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成',
-      '来个', '来一个', '整个', '整一个', '加个', '加一个', '做个', '做一个', '弄个', '弄一个'];
-    const shapeWords = ['圆', '矩形', '方形', '长方形', '正方形', '方块',
-      '直线', '线段', '线条', '三角', '星', '椭圆'];
-    if (drawVerbs.some((v) => t.includes(v)) && shapeWords.some((s) => t.includes(s))) return true;
-
-    // 移动：移动词 + 方向词
-    const hasMoveVerb = t.includes('移') || t.includes('动');
-    const directions = ['左', '右', '上', '下'];
-    if (hasMoveVerb && directions.some((d) => t.includes(d))) return true;
-
-    // 改色：修改动词 + 颜色词
-    const colorVerbs = ['改成', '变成', '换成', '调成', '改为', '变为', '换为',
-      '改颜色', '变颜色', '换颜色', '改色', '变色', '换色', '修改颜色', '调整颜色'];
-    const colorWords = ['红', '蓝', '绿', '黄', '紫', '橙', '黑', '白', '粉', '青', '灰'];
-    if (colorVerbs.some((v) => t.includes(v)) && colorWords.some((c) => t.includes(c))) return true;
-
-    // 缩放：专属动词短语即完整（不依赖宾语）
-    const sizeVerbs = ['放大', '缩小', '变大', '变小', '调大', '调小',
-      '大一点', '大一些', '小一点', '小一些', '大很多', '小很多', '增大', '扩大'];
-    if (sizeVerbs.some((v) => t.includes(v))) return true;
-
-    // 选中：选中词 + 目标（编号或形状）
-    const hasSelect = t.includes('选中') || t.includes('选择') || t.includes('点击');
-    const hasTarget = /\d+\s*号|[一二三四五六七八九十]+\s*号|第\s*[\d一二三四五六七八九十]/.test(t)
-      || ['圆', '矩形', '方形', '直线', '三角', '星', '椭圆'].some((s) => t.includes(s));
-    if (hasSelect && hasTarget) return true;
-
-    return false;
-  }
-
-  /**
-   * 生成预览对象
+   * 生成预览对象（三阶段：定位圆 → 彩色圆 → 实体形状）
+   *
+   * _stage=1：仅位置/无信息 → 红色虚线圆（定位指示器）
+   * _stage=2：颜色已知但形状未确认 → 彩色虚线圆
+   * _stage=3：形状已确认 → 实线实体形状
    */
   _generatePreview(keywords) {
     const { canvasWidth: W, canvasHeight: H } = store.state;
 
-    // 确定形状类型
-    const shapeTypeMap = {
-      '圆形': 'circle', '矩形': 'rect', '方形': 'rect',
-      '直线': 'line', '三角形': 'triangle',
-      '星形': 'star', '椭圆': 'ellipse',
-    };
-    const shapeType = shapeTypeMap[keywords.shape] || 'circle';
+    // 阶段1只显示圆形定位器，只有检测到形状才切换
+    const shapeType = keywords.shape ? this._getShapeType(keywords.shape) : 'circle';
 
-    // 确定位置（默认画布中心）
     let x = W / 2, y = H / 2;
+    if (keywords.position) {
+      const coords = positionToCoords(keywords.position, W, H);
+      x = coords.x;
+      y = coords.y;
+    }
 
-    // 确定大小
     let sizeModifier = {};
     if (keywords.size === 'large') {
       sizeModifier = { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 };
@@ -250,29 +172,82 @@ class VoiceDrawApp {
       sizeModifier = { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 };
     }
 
+    // 计算阶段
+    let stage = 1;
+    if (keywords.shape) stage = 3;
+    else if (keywords.color) stage = 2;
+
     const preview = createShape(shapeType, {
       x, y,
-      color: keywords.color || '#FF6B6B',
+      color: keywords.color || '#FF4444', // 阶段1用红色定位圆
       ...sizeModifier,
     });
+    preview._stage = stage;
+    preview._sizeTag = keywords.size || null;
 
     store.setPreview(preview);
-
-    // 设置预览超时（1.5秒无新输入自动确认）
     this._resetPreviewTimeout();
   }
 
   /**
-   * 更新预览参数
+   * 更新预览参数，随关键词逐步推进阶段
    */
   _updatePreview(keywords) {
     const preview = store.state.preview;
     if (!preview) return;
 
+    // 形状变化 → 重建预览并提升为阶段3
+    if (keywords.shape) {
+      const newShapeType = this._getShapeType(keywords.shape);
+      if (newShapeType !== preview.type) {
+        const { x, y } = preview;
+        let sizeModifier = {};
+        if (keywords.size === 'large' || preview._sizeTag === 'large') {
+          sizeModifier = { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 };
+        } else if (keywords.size === 'small' || preview._sizeTag === 'small') {
+          sizeModifier = { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 };
+        }
+        const newPreview = createShape(newShapeType, {
+          x, y,
+          color: keywords.color || preview.color,
+          ...sizeModifier,
+        });
+        newPreview._sizeTag = keywords.size || preview._sizeTag;
+        newPreview._stage = 3;
+        store.setPreview(newPreview);
+        this._resetPreviewTimeout();
+        return;
+      }
+    }
+
     const updates = {};
+
     if (keywords.color && keywords.color !== preview.color) {
       updates.color = keywords.color;
     }
+
+    if (keywords.position) {
+      const { canvasWidth: W, canvasHeight: H } = store.state;
+      const coords = positionToCoords(keywords.position, W, H);
+      updates.x = coords.x;
+      updates.y = coords.y;
+    }
+
+    if (keywords.size && keywords.size !== preview._sizeTag) {
+      if (keywords.size === 'large') {
+        Object.assign(updates, { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 });
+      } else if (keywords.size === 'small') {
+        Object.assign(updates, { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 });
+      }
+      updates._sizeTag = keywords.size;
+    }
+
+    // 阶段升级（只升不降）
+    const curStage = preview._stage || 1;
+    let newStage = curStage;
+    if (keywords.shape) newStage = 3;
+    else if (keywords.color && curStage < 2) newStage = 2;
+    if (newStage !== curStage) updates._stage = newStage;
 
     if (Object.keys(updates).length > 0) {
       store.setPreview({ ...preview, ...updates });
@@ -335,12 +310,20 @@ class VoiceDrawApp {
         result = this._execColor(command);
         break;
 
+      case 'shapeChange':
+        result = this._execShapeChange(command);
+        break;
+
       case 'resize':
         result = this._execResize(command);
         break;
 
       case 'move':
         result = this._execMove(command);
+        break;
+
+      case 'moveTo':
+        result = this._execMoveTo(command);
         break;
 
       case 'confirm':
@@ -414,30 +397,46 @@ class VoiceDrawApp {
   // ========== 指令执行方法 ==========
 
   _execDraw(command) {
-    // 如果有预览，确认预览
+    const { canvasWidth: W, canvasHeight: H } = store.state;
+
+    // 计算最终尺寸（命令优先，其次沿用预览的 _sizeTag）
+    const sizeTag = command.sizeModifier || (store.state.preview && store.state.preview._sizeTag);
+    const sizeOverrides = {};
+    if (sizeTag === 'large') {
+      Object.assign(sizeOverrides, { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 });
+    } else if (sizeTag === 'small') {
+      Object.assign(sizeOverrides, { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 });
+    }
+
     if (store.state.preview) {
       const preview = store.state.preview;
-      if (command.color) preview.color = command.color;
-      store.setPreview(preview);
+
+      // 计算最终位置（命令优先，其次沿用预览位置）
+      let finalX = preview.x;
+      let finalY = preview.y;
+      if (command.position) {
+        const coords = positionToCoords(command.position, W, H);
+        finalX = coords.x;
+        finalY = coords.y;
+      }
+
+      // 用最终命令属性（形状/颜色/尺寸/位置）重建预览再确认
+      const finalPreview = createShape(command.shape, {
+        x: finalX,
+        y: finalY,
+        color: command.color || preview.color || '#FF6B6B',
+        ...sizeOverrides,
+      });
+      store.setPreview(finalPreview);
       return store.confirmPreview();
     }
 
-    // 直接绘制
-    const { canvasWidth: W, canvasHeight: H } = store.state;
+    // 无预览 → 直接绘制
     let x = W / 2, y = H / 2;
-
-    // 如果指定了位置，计算实际坐标
     if (command.position) {
       const coords = positionToCoords(command.position, W, H);
       x = coords.x;
       y = coords.y;
-    }
-
-    const sizeOverrides = {};
-    if (command.sizeModifier === 'large') {
-      Object.assign(sizeOverrides, { radius: 80, width: 160, height: 120, size: 90 });
-    } else if (command.sizeModifier === 'small') {
-      Object.assign(sizeOverrides, { radius: 30, width: 60, height: 50, size: 35 });
     }
 
     const shape = createShape(command.shape, {
@@ -501,6 +500,26 @@ class VoiceDrawApp {
     return obj;
   }
 
+  _execShapeChange(command) {
+    const obj = store.getSelected();
+    if (!obj) {
+      voiceSynth.speak('请先选中一个对象');
+      this.toast.warning('请先选中一个对象');
+      return null;
+    }
+
+    // 形状变更：重建对象，保留位置和颜色
+    const newObj = createShape(command.shape, {
+      x: obj.x,
+      y: obj.y,
+      color: obj.color,
+    });
+    // 保留 id 和选中状态
+    newObj.id = obj.id;
+    store.replaceObject(obj.id, newObj);
+    return newObj;
+  }
+
   _execMove(command) {
     const obj = store.getSelected();
     if (!obj) {
@@ -510,7 +529,7 @@ class VoiceDrawApp {
     }
 
     if (command.dx !== undefined) {
-      // 方向移动
+      // 方向移动（相对）
       const dist = command.distance || 30;
       store.updateObject(obj.id, {
         x: obj.x + command.dx * dist,
@@ -518,6 +537,21 @@ class VoiceDrawApp {
       });
     }
 
+    return obj;
+  }
+
+  _execMoveTo(command) {
+    const obj = store.getSelected();
+    if (!obj) {
+      voiceSynth.speak('请先选中一个对象');
+      this.toast.warning('请先选中一个对象');
+      return null;
+    }
+
+    // 绝对位置移动
+    const { canvasWidth: W, canvasHeight: H } = store.state;
+    const coords = positionToCoords(command.position, W, H);
+    store.updateObject(obj.id, { x: coords.x, y: coords.y });
     return obj;
   }
 
