@@ -12,6 +12,9 @@ class DashScopeASR {
     this.model = options.model || 'paraformer-realtime-v2';
     this.sampleRate = options.sampleRate || 16000;
     this.format = options.format || 'pcm';
+    // 静音切割阈值（ms）：Paraformer 连续静音超过此值才结束当前句子
+    // 默认 800ms，调长到 1500ms 让用户有更多时间组织长指令
+    this.maxSentenceSilence = options.maxSentenceSilence || 1500;
     this.tasks = new Map();
   }
 
@@ -65,6 +68,7 @@ class DashScopeASR {
               format: this.format,
               sample_rate: this.sampleRate,
               language_hints: ['zh'],
+              max_sentence_silence: this.maxSentenceSilence,
             },
           },
         };
@@ -141,11 +145,8 @@ class DashScopeASR {
 
             const sentence = output.sentence;
             if (sentence) {
-              const text = (sentence.text || '').trim();
-              // 过滤空识别和纯标点
-              if (text.length < 2 || /^[\s\p{P}]+$/u.test(text)) return;
-
-              // 判断是否为最终结果(!text) return;
+              const text = sentence.text || '';
+              if (!text) return;
 
               // 判断是否为最终结果
               // 阿里云 Paraformer 使用 sentence_end 字段标记句子是否结束
