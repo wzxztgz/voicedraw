@@ -115,11 +115,18 @@ class VoiceDrawApp {
       const keywords = detectKeywords(text);
       store.set('detectedKeywords', keywords);
 
-      // 如果检测到形状，生成预览
-      if (keywords.shape && !store.state.preview) {
+      console.log('[Preview] text:', text, 'shape:', keywords.shape, 'color:', keywords.colorName, 'hasPreview:', !!store.state.preview);
+
+      // 只要有任何有效关键词（形状/颜色/位置/大小），就生成或更新预览
+      const hasAnyKeyword = keywords.shape || keywords.color || keywords.position || keywords.size;
+
+      if (hasAnyKeyword && !store.state.preview) {
+        // 首次检测到关键词，生成预览（形状默认圆形）
+        console.log('[Preview] Generating preview');
         this._generatePreview(keywords);
-      } else if (store.state.preview && keywords) {
-        // 更新预览参数
+      } else if (store.state.preview && hasAnyKeyword) {
+        // 已有预览，更新参数
+        console.log('[Preview] Updating preview');
         this._updatePreview(keywords);
       }
 
@@ -131,21 +138,37 @@ class VoiceDrawApp {
   }
 
   /**
-   * 生成预览对象
+   * 获取形状类型映射
+   * 支持中文名称和英文 type 两种输入
    */
-  _generatePreview(keywords) {
-    const { canvasWidth: W, canvasHeight: H } = store.state;
-
-    // 确定形状类型
+  _getShapeType(shapeName) {
     const shapeTypeMap = {
       '圆形': 'circle', '矩形': 'rect', '方形': 'rect',
       '直线': 'line', '三角形': 'triangle',
       '星形': 'star', '椭圆': 'ellipse',
     };
-    const shapeType = shapeTypeMap[keywords.shape] || 'circle';
+    // 如果已经是英文 type，直接返回
+    const validTypes = ['circle', 'rect', 'line', 'triangle', 'star', 'ellipse'];
+    if (validTypes.includes(shapeName)) return shapeName;
+    return shapeTypeMap[shapeName] || 'circle';
+  }
 
-    // 确定位置（默认画布中心）
+  /**
+   * 生成预览对象
+   */
+  _generatePreview(keywords) {
+    const { canvasWidth: W, canvasHeight: H } = store.state;
+
+    // 确定形状类型（未检测到形状时默认圆形）
+    const shapeType = this._getShapeType(keywords.shape);
+
+    // 确定位置（默认画布中心，支持位置词偏移）
     let x = W / 2, y = H / 2;
+    if (keywords.position) {
+      const coords = positionToCoords(keywords.position, W, H);
+      x = coords.x;
+      y = coords.y;
+    }
 
     // 确定大小
     let sizeModifier = {};
@@ -169,14 +192,57 @@ class VoiceDrawApp {
 
   /**
    * 更新预览参数
+   * 支持动态更新形状、颜色、位置、大小
    */
   _updatePreview(keywords) {
     const preview = store.state.preview;
     if (!preview) return;
 
+    // 检查形状是否变化（只有明确检测到新形状时才切换）
+    console.log('[Preview] Update check - keywords.shape:', keywords.shape, 'preview.type:', preview.type);
+    if (keywords.shape) {
+      const newShapeType = this._getShapeType(keywords.shape);
+      console.log('[Preview] newShapeType:', newShapeType, 'current:', preview.type, 'diff:', newShapeType !== preview.type);
+      if (newShapeType !== preview.type) {
+      // 形状变化，重新创建预览对象，保留位置/颜色/大小
+      const { x, y, color } = preview;
+      let sizeModifier = {};
+      if (keywords.size === 'large' || preview._sizeTag === 'large') {
+        sizeModifier = { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 };
+      } else if (keywords.size === 'small' || preview._sizeTag === 'small') {
+        sizeModifier = { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 };
+      }
+      const newPreview = createShape(newShapeType, { x, y, color, ...sizeModifier });
+      newPreview._sizeTag = preview._sizeTag;
+      store.setPreview(newPreview);
+      this._resetPreviewTimeout();
+      return;
+      }
+    }
+
     const updates = {};
+
+    // 更新颜色
     if (keywords.color && keywords.color !== preview.color) {
       updates.color = keywords.color;
+    }
+
+    // 更新位置
+    if (keywords.position) {
+      const { canvasWidth: W, canvasHeight: H } = store.state;
+      const coords = positionToCoords(keywords.position, W, H);
+      updates.x = coords.x;
+      updates.y = coords.y;
+    }
+
+    // 更新大小
+    if (keywords.size && keywords.size !== preview._sizeTag) {
+      if (keywords.size === 'large') {
+        Object.assign(updates, { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 });
+      } else if (keywords.size === 'small') {
+        Object.assign(updates, { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 });
+      }
+      updates._sizeTag = keywords.size;
     }
 
     if (Object.keys(updates).length > 0) {
@@ -195,7 +261,7 @@ class VoiceDrawApp {
       if (store.state.preview) {
         this._executeCommand({ type: 'confirm' });
       }
-    }, 1500);
+    }, 4000);
   }
 
   /**
@@ -319,11 +385,22 @@ class VoiceDrawApp {
   // ========== 指令执行方法 ==========
 
   _execDraw(command) {
-    // 如果有预览，确认预览
+    // 如果有预览，检查形状是否匹配
     if (store.state.preview) {
       const preview = store.state.preview;
-      if (command.color) preview.color = command.color;
-      store.setPreview(preview);
+      const targetShapeType = this._getShapeType(command.shape);
+
+      if (targetShapeType !== preview.type) {
+        // 形状不匹配，重新创建正确形状的预览
+        const { x, y } = preview;
+        const color = command.color || preview.color;
+        const newPreview = createShape(targetShapeType, { x, y, color });
+        store.setPreview(newPreview);
+      } else {
+        // 形状匹配，更新其他属性
+        if (command.color) preview.color = command.color;
+        store.setPreview(preview);
+      }
       return store.confirmPreview();
     }
 

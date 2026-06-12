@@ -14,7 +14,7 @@ class VoiceRecorder {
     this.reconnectTimer = null;
     this.isConnecting = false;
     this.silenceTimer = null;
-    this.silenceThreshold = 1500; // 1.5秒无语音视为说完
+    this.silenceThreshold = 4000; // 4秒无语音视为说完
     this.onResult = null;       // (text, isFinal) => {}
     this.onStatusChange = null; // (status) => {}
   }
