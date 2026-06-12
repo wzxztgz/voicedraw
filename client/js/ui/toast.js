@@ -7,6 +7,10 @@ export class Toast {
   constructor(containerEl) {
     this.container = containerEl;
     this.timer = null;
+    // 警告消息去重：记录上次显示的内容和时间
+    this._lastWarning = '';
+    this._lastWarningTime = 0;
+    this._warningCooldownMs = 3000;
   }
 
   /**
@@ -16,8 +20,19 @@ export class Toast {
    * @param {number} duration - 显示时长(ms)
    */
   show(message, type = 'info', duration = 3000) {
-    // 清除之前的计时器
+    // 警告类消息：相同内容在冷却期内不重复弹出
+    if (type === 'warning') {
+      const now = Date.now();
+      if (message === this._lastWarning && now - this._lastWarningTime < this._warningCooldownMs) {
+        return;
+      }
+      this._lastWarning = message;
+      this._lastWarningTime = now;
+    }
+
+    // 清除之前的计时器，并立即移除所有现存 toast，避免 DOM 堆积
     if (this.timer) clearTimeout(this.timer);
+    Array.from(this.container.children).forEach((el) => el.remove());
 
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
