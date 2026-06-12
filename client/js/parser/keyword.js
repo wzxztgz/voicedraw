@@ -72,29 +72,38 @@ export function parseCommand(text) {
   }
 
   // 7. "再..." 微调指令
+  // 注意：若同时含有绘制动词+形状（如"再画一个圆"），优先走 parseDraw，
+  // 否则 parseRefine 会静默失败（_execRefine 不处理 draw 类型）
   if (text.startsWith('再') || text.startsWith('继续')) {
-    return parseRefine(text);
+    const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成', '来个', '来一个'];
+    const hasDrawVerb = drawVerbs.some((v) => text.includes(v));
+    if (!hasDrawVerb) return parseRefine(text);
+    // 有绘制动词时，跳过 parseRefine，让 parseDraw 处理
   }
 
   // 8. 选中指令
   const selectResult = parseSelect(text);
   if (selectResult) return selectResult;
 
+  // 8.5 删除指令
+  const deleteResult = parseDelete(text);
+  if (deleteResult) return deleteResult;
+
   // 9. 颜色修改指令
   const colorResult = parseColorChange(text);
   if (colorResult) return colorResult;
 
-  // 10. 大小调整指令
+  // 10. 图形绘制指令（必须在大小调整前，防止"画一个大一点的圆"被误判为 resize）
+  const drawResult = parseDraw(text);
+  if (drawResult) return drawResult;
+
+  // 11. 大小调整指令
   const sizeResult = parseSizeChange(text);
   if (sizeResult) return sizeResult;
 
-  // 11. 位置移动指令
+  // 12. 位置移动指令
   const moveResult = parseMove(text);
   if (moveResult) return moveResult;
-
-  // 12. 图形绘制指令
-  const drawResult = parseDraw(text);
-  if (drawResult) return drawResult;
 
   // 13. 复合指令（包含 "先...然后..." 或 "再..."）
   const compoundResult = parseCompound(text);
@@ -113,7 +122,7 @@ function parseDraw(text) {
     ['ellipse',  ['椭圆形', '椭圆']],
     ['triangle', ['三角形', '三角']],
     ['rect',     ['矩形', '长方形', '正方形', '方形', '方块']],
-    ['line',     ['直线', '线段', '线条']],
+    ['line',     ['直线', '线段', '线条', '线']],
     ['star',     ['五角星', '星形', '星星']],
     ['circle',   ['圆形', '圆圈', '圆']],
   ];
@@ -210,7 +219,7 @@ function parseSelect(text) {
     const hasSelectVerb = text.includes('选中') || text.includes('选择') || text.includes('点击');
     // 含有操作动词（移/改/放大等）但无选中词 → 这是针对目标的操作指令，不是选中指令
     // 交给 parseMove / parseColorChange / parseSizeChange 处理（它们会通过 extractTarget 获取目标）
-    const hasActionVerb = ['移', '放大', '缩小', '变大', '变小', '改成', '变成', '换成', '调成'].some((v) => text.includes(v));
+    const hasActionVerb = ['移', '放大', '缩小', '变大', '变小', '改成', '变成', '换成', '调成', '删除', '删掉', '移除', '去掉', '擦掉', '擦除'].some((v) => text.includes(v));
     if (hasActionVerb && !hasSelectVerb) {
       // 不拦截，让操作解析器处理
     } else {
@@ -243,6 +252,19 @@ function parseSelect(text) {
   }
 
   return null;
+}
+
+/**
+ * 解析删除指令
+ * "删除1号" / "删掉三号" / "删除它" / "删除选中的" / "删除" (删当前选中)
+ */
+function parseDelete(text) {
+  const deleteVerbs = ['删除', '删掉', '移除', '去掉', '擦掉', '擦除'];
+  if (!deleteVerbs.some((v) => text.includes(v))) return null;
+
+  // 提取目标编号
+  const target = extractTarget(text);
+  return { type: 'delete', target };
 }
 
 /**
@@ -321,7 +343,8 @@ function parseMove(text) {
   }
 
   // 相对移动："向右移一点" / "往左下移动一些"
-  if (!text.includes('移') && !text.includes('动')) return null;
+  // 只要求含 '移'，避免 '动' 误匹配"活动""运动"等无关词
+  if (!text.includes('移')) return null;
 
   const movement = parseMovement(text);
   if (!movement) return null;

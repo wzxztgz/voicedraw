@@ -261,11 +261,15 @@ class VoiceDrawApp {
    */
   _resetPreviewTimeout() {
     if (this.previewTimeout) clearTimeout(this.previewTimeout);
+    // 超时只取消预览（防止卡死），不自动确认。
+    // 确认动作由 ASR isFinal 触发的 _execDraw 负责。
+    // 超时设为 3000ms > ASR静音(1500ms)+前端合并(500ms)+网络延迟，
+    // 保证正常流程中 isFinal 先到达并清除此计时器。
     this.previewTimeout = setTimeout(() => {
       if (store.state.preview) {
-        this._executeCommand({ type: 'confirm' });
+        store.cancelPreview();
       }
-    }, 1500);
+    }, 3000);
   }
 
   /**
@@ -305,6 +309,10 @@ class VoiceDrawApp {
 
       case 'select':
         result = this._execSelect(command);
+        break;
+
+      case 'delete':
+        result = this._execDelete(command);
         break;
 
       case 'color':
@@ -469,6 +477,28 @@ class VoiceDrawApp {
       this.toast.warning('未找到指定对象');
       return null;
     }
+  }
+
+  _execDelete(command) {
+    let obj = null;
+    if (command.target && command.target.type === 'id') {
+      obj = store.getObjectByNumber(command.target.value);
+      if (!obj) {
+        const msg = `没有找到 ${command.target.value} 号对象`;
+        voiceSynth.speak(msg);
+        this.toast.warning(msg);
+        return null;
+      }
+    } else {
+      obj = store.getSelected();
+      if (!obj) {
+        voiceSynth.speak('请先选中一个对象');
+        this.toast.warning('请先选中一个对象');
+        return null;
+      }
+    }
+    store.removeObject(obj.id);
+    return obj;
   }
 
   _execColor(command) {

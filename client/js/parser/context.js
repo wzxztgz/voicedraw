@@ -87,6 +87,9 @@ class ContextManager {
       case 'select': {
         return `已选中 ${result.id} 号`;
       }
+      case 'delete': {
+        return `已删除 ${result.id} 号`;
+      }
       case 'clear':
         return '画布已清除';
       case 'undo':
