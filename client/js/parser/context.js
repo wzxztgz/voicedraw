@@ -141,6 +141,9 @@ class ContextManager {
     if (text.includes('移') || text.includes('动')) {
       suggestions.push('往左移一点');
     }
+    if (/选中|选择/.test(text)) {
+      suggestions.push('选中3号');
+    }
 
     if (suggestions.length > 0) {
       return `你是说 ${suggestions.slice(0, 2).join(' 还是 ')} 吗？`;

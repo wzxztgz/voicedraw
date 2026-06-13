@@ -455,15 +455,6 @@ function parseSelect(text) {
     }
   }
 
-  // "选中红色的圆"
-  if (text.includes('选中') || text.includes('选择') || text.includes('点击')) {
-    const shapeType = resolveShapeType(text);
-    if (shapeType) {
-      const position = parsePosition(text);
-      return { type: 'select', target: { type: 'shape', shapeType, position } };
-    }
-  }
-
   return null;
 }
 
