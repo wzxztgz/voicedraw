@@ -167,9 +167,14 @@ const PARSE_SYSTEM_PROMPT = `你是一个语音绘图指令解析器。将中文
 【单条命令格式】
 
 绘制图形（shape: circle/rect/line/triangle/star/ellipse/diamond/rounded-rect/arrow-line）：
-{"type":"draw","shape":"circle","color":"#FF6B6B","position":{"dx":0,"dy":0}}
+绝对位置：{"type":"draw","shape":"circle","color":"#FF6B6B","position":{"dx":0,"dy":0}}
 shape 取值：circle=圆形 rect=矩形 rounded-rect=圆角矩形 diamond=菱形 arrow-line=箭头线
 color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，左=-1右=1上=-1下=1
+若用户描述「在N号（右边/左边/上面/下面/旁边）画某形状」，使用相对位置格式（与 position 互斥）：
+{"type":"draw","shape":"rect","relativeToId":1,"relativeSide":"right"}
+relativeSide 取值：right=右 left=左 above=上 below=下
+注意：即使句中无「画」字，「在N号方位+形状词」也是绘制意图，用相对位置格式
+注意：禁止将「在N号方位+形状」解析为 select；「花园」「花圆」在此语境下均代表「画圆」
 
 修改颜色：{"type":"color","color":"#FF6B6B","targetId":3}  （targetId 无指定则 null）
 
@@ -193,13 +198,17 @@ shape 支持：circle/rect/rounded-rect/diamond/line/triangle/star/ellipse/arrow
 添加文字标注：{"type":"addText","content":"文字内容","refId":1,"side":null}
 side 为方位 right/left/above/below，写在图形内部时为 null
 
-【复合指令格式】（含多个步骤时使用）：
+【复合指令格式】（含多个步骤时必须返回 compound，禁止只返回第一步）：
 {"type":"compound","tasks":[
   {"type":"draw","shape":"circle","color":"#FF6B6B"},
   {"type":"draw","shape":"rect","color":"#45B7D1"},
-  {"type":"color","color":"#96CEB4","targetId":null}
+  {"type":"color","color":"#96CEB4","targetId":1}
 ]}
-tasks 中每个元素的格式与单条命令相同；按句子顺序排列；无法识别的步骤直接跳过不要放入 tasks。
+tasks 按句子顺序排列；支持混合类型：draw + color + connect + move + delete + shapeChange
+示例：「先画圆，然后把1号改成红色」→ compound 含 draw + color(targetId:1)
+示例：「先画两个圆，然后连接1号和2号」→ compound 含两个 draw + connect
+相对位置子句用 relativeToId + relativeSide，不用九宫格 position
+无法识别的步骤跳过，不要放入 tasks；但至少放入所有能识别的步骤
 
 无法识别：{"type":"unknown"}
 
