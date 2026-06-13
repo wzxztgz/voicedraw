@@ -6,7 +6,7 @@
 import store from './state/store.js';
 import Renderer from './canvas/renderer.js';
 import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName, getShapeBounds, getShapeEdgePoint } from './canvas/shapes.js';
-import { parseCommandWithConfidence, detectKeywords, hasComplexSignal } from './parser/keyword.js';
+import { parseCommandWithConfidence, parseCompoundRules, detectKeywords, hasComplexSignal } from './parser/keyword.js';
 import { positionToCoords } from './canvas/grid.js';
 import contextManager from './parser/context.js';
 import voiceRecorder from './voice/recorder.js';
@@ -140,12 +140,20 @@ class VoiceDrawApp {
         return;
       }
 
+      // 复合指令：禁用单条形状预览，避免「闪一下」
+      if (hasComplexSignal(text)) {
+        if (store.state.preview) store.cancelPreview();
+        if (this.previewTimeout) clearTimeout(this.previewTimeout);
+        return;
+      }
+
       // 实时关键词检测 → 触发预渲染
       const keywords = detectKeywords(text);
       store.set('detectedKeywords', keywords);
 
       // 必须有绘制意图词（画/绘制/创建…）才触发预览，避免"移动三角形"等误触发
-      const hasAnyKeyword = keywords.shape || keywords.color || keywords.position || keywords.size;
+      const hasAnyKeyword = keywords.shape || keywords.color || keywords.position
+        || keywords.size || keywords.relativeToId;
 
       if (keywords.hasDrawIntent && hasAnyKeyword && !store.state.preview) {
         // 首次检测到关键词且有绘制意图，生成预览
@@ -273,7 +281,13 @@ class VoiceDrawApp {
     const shapeType = keywords.shape ? this._getShapeType(keywords.shape) : 'circle';
 
     let x = W / 2, y = H / 2;
-    if (keywords.position) {
+    if (keywords.relativeToId) {
+      const refObj = store.getObjectByNumber(keywords.relativeToId);
+      if (refObj) {
+        const pos = this._sideCoords(refObj, keywords.relativeSide);
+        x = pos.x; y = pos.y;
+      }
+    } else if (keywords.position) {
       const coords = positionToCoords(keywords.position, W, H);
       x = coords.x;
       y = coords.y;
@@ -349,6 +363,15 @@ class VoiceDrawApp {
       updates.y = coords.y;
     }
 
+    if (keywords.relativeToId) {
+      const refObj = store.getObjectByNumber(keywords.relativeToId);
+      if (refObj) {
+        const pos = this._sideCoords(refObj, keywords.relativeSide);
+        updates.x = pos.x;
+        updates.y = pos.y;
+      }
+    }
+
     if (keywords.size && keywords.size !== preview._sizeTag) {
       if (keywords.size === 'large') {
         Object.assign(updates, { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 });
@@ -391,18 +414,23 @@ class VoiceDrawApp {
   /**
    * 处理最终指令
    * 置信度路由策略：
-   *   Layer 1：复杂结构信号 → 直接 LLM（不让规则误判）
-   *   Layer 2：parseCommandWithConfidence → confidence==='high' 则规则执行，否则 LLM 兜底
-   *   Layer 3（内含）：parseLLMIntent → llm-draw → _execLLMDraw（描述模式）
-   *
-   * 简单指令路径（画圆/撤销/选中等）与之前完全相同，无额外开销。
-   * 只有规则低置信度句子才多走一次 LLM。
+   *   Layer 0：规则复合快路径（子句全 high）→ 直接执行，0 LLM token
+   *   Layer 1：复杂结构信号 → LLM
+   *   Layer 2：单条 parseCommandWithConfidence → high 执行，否则 LLM
    */
   _processCommand(text) {
     if (this.previewTimeout) clearTimeout(this.previewTimeout);
 
-    // Layer 1：复杂结构信号主动路由
-    // 多动作复合句直接交给 LLM，不等规则误判成单条指令。
+    // Layer 0：规则复合快路径（标准「先/然后」模板，子句全部高置信）
+    const compoundFast = parseCompoundRules(text);
+    if (compoundFast?.confidence === 'high') {
+      console.log('[VoiceDraw] Compound fast path:', text);
+      store.cancelPreview();
+      this._executeCommand(compoundFast.command, text);
+      return;
+    }
+
+    // Layer 1：复杂结构信号 → LLM
     if (hasComplexSignal(text)) {
       console.log('[VoiceDraw] Complex signal → LLM:', text);
       store.cancelPreview();
@@ -410,9 +438,7 @@ class VoiceDrawApp {
       return;
     }
 
-    // Layer 2：置信度规则解析
-    // 高置信度（规则明确命中）→ 直接执行，<5ms，0 LLM token
-    // 低置信度（规则不确定）→ LLM 兜底，保证语义正确
+    // Layer 2：单条置信度规则解析
     const { command, confidence } = parseCommandWithConfidence(text);
 
     if (confidence === 'high') {
@@ -420,7 +446,6 @@ class VoiceDrawApp {
       return;
     }
 
-    // 规则低置信 / unknown → LLM 兜底
     store.cancelPreview();
     this._llmFallbackParse(text);
   }
@@ -910,11 +935,17 @@ class VoiceDrawApp {
   }
 
   async _execCompound(command) {
+    if (!command.tasks || command.tasks.length === 0) {
+      this.toast.warning('没有可执行的步骤');
+      return;
+    }
+
     this.isProcessing = true;
 
-    // 如果有跳过的子句，先给一次提示（不影响后续执行）
     if (command.skipped && command.skipped.length > 0) {
-      const skippedHint = `跳过无法识别的步骤：${command.skipped.slice(0, 2).join('、')}`;
+      const skippedHint = command.tasks.length >= 2
+        ? `跳过无法识别的步骤：${command.skipped.slice(0, 2).join('、')}`
+        : `仅识别 ${command.tasks.length} 步，跳过：${command.skipped.slice(0, 2).join('、')}`;
       this.toast.warning(skippedHint, 3000);
     }
 

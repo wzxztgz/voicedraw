@@ -905,35 +905,58 @@ function parseBatch(text) {
   return { type: 'batch-color', color, filterShape };
 }
 
+/** 复合指令分隔符（规则快路径与 parseCompound 共用） */
+const COMPOUND_SEPARATORS = ['先', '然后', '接着', '最后', '并且', '还要', '之后'];
+const COMPOUND_SPLIT_RE = /先|然后|接着|最后|并且|还要|之后|(?<!^)再/;
+
+/** 文本是否含复合分隔词（不含 hasComplexSignal 的「双绘制动词」等条件） */
+function hasCompoundSeparator(text) {
+  if (COMPOUND_SEPARATORS.some((s) => text.includes(s))) return true;
+  if (!text.startsWith('再') && !text.startsWith('继续') && text.includes('再')) return true;
+  return false;
+}
+
+/** 按分隔符拆分子句 */
+function splitCompoundParts(text) {
+  return text.split(COMPOUND_SPLIT_RE).map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
 /**
- * 解析复合指令
+ * 复合指令规则快路径（供 _processCommand 在 hasComplexSignal 之前调用）
+ * 仅当每个子句 parseCommandWithConfidence 均为 high 时才返回 compound。
+ * 任一子句低置信 → 返回 null，交给 hasComplexSignal / LLM 处理。
  */
-function parseCompound(text) {
-  const separators = ['先', '然后', '接着', '最后'];
-  let hasSeparator = false;
-  for (const sep of separators) {
-    if (text.includes(sep)) {
-      hasSeparator = true;
-      break;
-    }
-  }
+export function parseCompoundRules(rawText) {
+  const text = correctHomophones(rawText.trim().toLowerCase());
+  if (!hasCompoundSeparator(text)) return null;
+  if (text.startsWith('再') || text.startsWith('继续')) return null;
 
-  // "再" 只在不以它开头时作为 compound 分隔符，
-  // 避免与 parseRefine（step 7）冲突
-  if (!hasSeparator && !text.startsWith('再') && text.includes('再')) {
-    hasSeparator = true;
-  }
-
-  if (!hasSeparator) return null;
-
-  // 按分隔符拆分（"再"在开头时不作分隔符）
-  const parts = text.split(/先|然后|接着|最后|(?<!^)再/).filter((s) => s.trim().length > 0);
+  const parts = splitCompoundParts(text);
   if (parts.length < 2) return null;
 
-  const subTasks = parts.map((part) => parseCommand(part.trim()));
+  const results = parts.map((part) => parseCommandWithConfidence(part));
+  const allHigh = results.every(
+    (r) => r.confidence === 'high' && r.command && r.command.type !== 'unknown',
+  );
+  if (!allHigh) return null;
 
-  // 只保留能识别的子任务，跳过 unknown（不再因为一句话而放弃整条指令）
-  // _skipped 记录被跳过的原始文本，供执行层给出提示
+  return {
+    command: { type: 'compound', tasks: results.map((r) => r.command), skipped: [] },
+    confidence: 'high',
+  };
+}
+
+/**
+ * 解析复合指令（规则慢路径，允许跳过 unknown 子句）
+ */
+function parseCompound(text) {
+  if (!hasCompoundSeparator(text)) return null;
+
+  const parts = splitCompoundParts(text);
+  if (parts.length < 2) return null;
+
+  const subTasks = parts.map((part) => parseCommand(part));
+
   const validTasks = [];
   const skipped = [];
   parts.forEach((part, i) => {
@@ -941,11 +964,11 @@ function parseCompound(text) {
     if (cmd && cmd.type !== 'unknown') {
       validTasks.push(cmd);
     } else {
-      skipped.push(part.trim());
+      skipped.push(part);
     }
   });
 
-  if (validTasks.length < 2) return null;
+  if (validTasks.length < 1) return null;
 
   return {
     type: 'compound',
@@ -1120,7 +1143,11 @@ export function parseCommandWithConfidence(rawText) {
  * 避免"将三角形往上移动"等操作指令误触发绘制预览。
  */
 export function detectKeywords(text) {
-  const keywords = { color: null, colorName: null, shape: null, size: null, position: null, hasDrawIntent: false };
+  const keywords = {
+    color: null, colorName: null, shape: null, size: null,
+    position: null, relativeToId: null, relativeSide: null,
+    hasDrawIntent: false,
+  };
 
   const drawIntentWords = [
     '画', '绘制', '绘画', '新建', '创建', '添加',
@@ -1139,13 +1166,33 @@ export function detectKeywords(text) {
     }
   }
 
-  keywords.shape = detectShapeLabel(text);
+  // 严格形状识别，避免「花园」等误触发预览
+  const strictType = resolveShapeTypeStrict(text);
+  if (strictType) {
+    const labelMap = {
+      circle: '圆形', rect: '矩形', line: '直线', triangle: '三角形',
+      star: '星形', ellipse: '椭圆', diamond: '菱形', 'rounded-rect': '圆角矩形',
+    };
+    keywords.shape = labelMap[strictType] || detectShapeLabel(text);
+  }
 
   if (text.includes('大') || text.includes('放大')) keywords.size = 'large';
   else if (text.includes('小') || text.includes('缩小')) keywords.size = 'small';
 
-  const position = parsePosition(text);
-  if (position) keywords.position = position;
+  // 相对位置优先于九宫格绝对位置
+  const relMatch = REL_MATCH_RE.exec(text);
+  if (relMatch) {
+    const numStr = relMatch[1];
+    const relativeToId = parseInt(numStr) || chineseNumToInt(numStr);
+    const relativeSide = parseSide(relMatch[2]);
+    if (relativeToId && relativeSide) {
+      keywords.relativeToId = relativeToId;
+      keywords.relativeSide = relativeSide;
+    }
+  } else {
+    const position = parsePosition(text);
+    if (position) keywords.position = position;
+  }
 
   return keywords;
 }

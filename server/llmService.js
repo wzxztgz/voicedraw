@@ -198,13 +198,17 @@ shape 支持：circle/rect/rounded-rect/diamond/line/triangle/star/ellipse/arrow
 添加文字标注：{"type":"addText","content":"文字内容","refId":1,"side":null}
 side 为方位 right/left/above/below，写在图形内部时为 null
 
-【复合指令格式】（含多个步骤时使用）：
+【复合指令格式】（含多个步骤时必须返回 compound，禁止只返回第一步）：
 {"type":"compound","tasks":[
   {"type":"draw","shape":"circle","color":"#FF6B6B"},
   {"type":"draw","shape":"rect","color":"#45B7D1"},
-  {"type":"color","color":"#96CEB4","targetId":null}
+  {"type":"color","color":"#96CEB4","targetId":1}
 ]}
-tasks 中每个元素的格式与单条命令相同；按句子顺序排列；无法识别的步骤直接跳过不要放入 tasks。
+tasks 按句子顺序排列；支持混合类型：draw + color + connect + move + delete + shapeChange
+示例：「先画圆，然后把1号改成红色」→ compound 含 draw + color(targetId:1)
+示例：「先画两个圆，然后连接1号和2号」→ compound 含两个 draw + connect
+相对位置子句用 relativeToId + relativeSide，不用九宫格 position
+无法识别的步骤跳过，不要放入 tasks；但至少放入所有能识别的步骤
 
 无法识别：{"type":"unknown"}
 
