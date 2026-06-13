@@ -50,9 +50,61 @@ export function drawGrid(ctx, canvasWidth, canvasHeight) {
   ctx.restore();
 }
 
+/** 九宫格方位标注（与 positionToCoords 落点一致） */
+const POSITION_HINTS = [
+  { label: '左上角', dx: -1, dy: -1 },
+  { label: '上方',   dx:  0, dy: -1 },
+  { label: '右上角', dx:  1, dy: -1 },
+  { label: '左边',   dx: -1, dy:  0 },
+  { label: '中间',   dx:  0, dy:  0 },
+  { label: '右边',   dx:  1, dy:  0 },
+  { label: '左下角', dx: -1, dy:  1 },
+  { label: '下方',   dx:  0, dy:  1 },
+  { label: '右下角', dx:  1, dy:  1 },
+];
+
 /**
- * 方位关键词映射
+ * 在画布上绘制九宫格方位浅色文字提示
+ * 帮助用户说「在左上角画一个圆」等位置指令
  */
+export function drawPositionHints(ctx, canvasWidth, canvasHeight) {
+  ctx.save();
+
+  // 浅色分区参考线（竖向 1/3、2/3，横向 1/3、2/3）
+  ctx.strokeStyle = 'rgba(180, 190, 205, 0.22)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 8]);
+  const vx1 = canvasWidth / 3;
+  const vx2 = canvasWidth * 2 / 3;
+  const hy1 = canvasHeight / 3;
+  const hy2 = canvasHeight * 2 / 3;
+  for (const x of [vx1, vx2]) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, canvasHeight);
+    ctx.stroke();
+  }
+  for (const y of [hy1, hy2]) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(canvasWidth, y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // 方位文字（与语音落点坐标对齐）
+  ctx.font = '13px "Noto Sans SC", sans-serif';
+  ctx.fillStyle = 'rgba(150, 162, 178, 0.42)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const { label, dx, dy } of POSITION_HINTS) {
+    const { x, y } = positionToCoords({ dx, dy }, canvasWidth, canvasHeight);
+    ctx.fillText(label, x, y);
+  }
+
+  ctx.restore();
+}
+
 export const DIRECTION_MAP = {
   '左上': { dx: -1, dy: -1 },
   '右上': { dx: 1, dy: -1 },
