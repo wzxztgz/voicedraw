@@ -23,8 +23,9 @@ const HOMOPHONE_MAP = {
   '绿色': '绿色', '录色': '绿色', '陆色': '绿色',
   '红色': '红色', '洪色': '红色',
   '黄色': '黄色', '皇色': '黄色',
-  // 操作动词同音词
+  // 操作动词同音词（ASR 常将「画」误识为挂/花）
   '画个': '画一个', '花一个': '画一个', '花个': '画一个',
+  '挂一个': '画一个', '挂个': '画个',
   '撤回': '撤销',
 };
 
@@ -825,24 +826,38 @@ function parseShapeChange(text) {
 
 /**
  * LLM 意图检测
- * 当指令中同时包含「绘制动词」和「复杂图形关键词」时，交由 LLM 解析
- * 使用原始文本（含标点、大小写）作为 prompt，提高 LLM 理解质量
+ * 复杂图形（流程图/图表/思维导图等）优先走 LLM 生成。
+ * 明确图表类型词（如「流程图」）即使缺少绘制动词（ASR 漏识/误识「画」）也应触发。
  */
 function parseLLMIntent(text, original) {
-  const llmShapes = [
+  const prompt = original || text;
+
+  // 明确图表/导图类型：不依赖绘制动词（覆盖「请假流程图」「挂一个请假流程图」等）
+  const explicitDiagramTypes = [
     '柱状图', '折线图', '饼图', '条形图', '曲线图', '趋势图',
-    '流程图', '流程',            // "请假审批流程" 不带"图"字也能命中
-    '思维导图', '脑图', '导图',
+    '流程图', '思维导图', '脑图', '导图',
+  ];
+  if (explicitDiagramTypes.some((k) => text.includes(k))) {
+    return { type: 'llm-draw', prompt };
+  }
+
+  const softLLMShapes = [
+    '流程',                      // "请假审批流程" 不带「图」字
     '房子', '树', '花', '汽车', '地图',
   ];
   const drawVerbs = [
     '画', '绘制', '生成', '创建', '新建', '做个', '来一个', '整一个', '帮我画',
     '搞个', '搞一个', '要个', '要一个', '给我画', '帮我整', '帮我做',
+    '挂', '挂一个', '挂个',     // ASR 将「画」误识为「挂」
   ];
-  const hasLLMShape = llmShapes.some((k) => text.includes(k));
-  const hasDrawVerb = drawVerbs.some((v) => text.includes(v));
+
+  const hasLLMShape = softLLMShapes.some((k) => text.includes(k));
+  // ASR 将「画一个」误识为「换一个」：仅在含流程/图表语境时视为绘制意图
+  const swapAsDraw = /换一个|换个|换一/.test(text) && hasLLMShape;
+  const hasDrawVerb = drawVerbs.some((v) => text.includes(v)) || swapAsDraw;
+
   if (hasLLMShape && hasDrawVerb) {
-    return { type: 'llm-draw', prompt: original || text };
+    return { type: 'llm-draw', prompt };
   }
   return null;
 }

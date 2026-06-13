@@ -4,7 +4,7 @@
 
 // ─── 工具 ──────────────────────────────────────────────────
 
-function sysText(x, y, content, fontSize = 13, color = '#fff', textAlign = 'center') {
+function sysText(x, y, content, fontSize = 13, color = '#333333', textAlign = 'center') {
   return { type: 'text', x, y, content: String(content), fontSize, color, textAlign, _system: true };
 }
 
@@ -12,9 +12,9 @@ function sysLine(x, y, x2, y2, color = '#aaa', lineWidth = 1.5) {
   return { type: 'line', x, y, x2, y2, color, lineWidth, _system: true };
 }
 
-/** 直角折线连线（流程图专用，含箭头） */
-function sysOrthoLine(x, y, x2, y2, color = '#888', lineWidth = 1.8) {
-  return { type: 'ortho', x, y, x2, y2, color, lineWidth, _system: true };
+/** 直角折线连线（流程图专用，含箭头）；extra 可传 _loopback/_sideX */
+function sysOrthoLine(x, y, x2, y2, color = '#888', lineWidth = 1.8, extra = {}) {
+  return { type: 'ortho', x, y, x2, y2, color, lineWidth, _system: true, ...extra };
 }
 
 /**
@@ -40,7 +40,8 @@ export function renderFlowchart(config, W, H) {
 
   const nodeW = 140, nodeH = 52;
   const vGap   = 65;
-  const mt     = 48;
+  const topMargin = 48;
+  const bottomMargin = 56; // 底部留白，避免最底层节点贴边或被底部栏视觉遮挡
   const pad    = 20; // 左右最小边距
 
   // 按 level 分组
@@ -50,16 +51,30 @@ export function renderFlowchart(config, W, H) {
     (levelMap[lv] = levelMap[lv] || []).push(n);
   });
 
+  const levels = Object.keys(levelMap).map(Number);
+  const minLevel = levels.length ? Math.min(...levels) : 1;
+  const maxLevel = levels.length ? Math.max(...levels) : 1;
+  const levelCount = maxLevel - minLevel + 1;
+
+  // 根据画布高度自动压缩层间距，保证最底层节点落在可视区内
+  const availH = H - topMargin - bottomMargin;
+  const naturalH = levelCount * nodeH + (levelCount - 1) * vGap;
+  let gap = vGap;
+  if (naturalH > availH && levelCount > 1) {
+    gap = Math.max(24, (availH - levelCount * nodeH) / (levelCount - 1));
+  }
+  const usedH = (levelCount - 1) * (nodeH + gap) + nodeH;
+  const startY = topMargin + Math.max(0, (availH - usedH) / 2);
+
   // 动态调整节点宽以防止同级节点重叠
   const maxPerLevel = Math.max(...Object.values(levelMap).map((a) => a.length));
   const availW = W - pad * 2;
   const hGap   = Math.max(20, (availW - nodeW * maxPerLevel) / (maxPerLevel + 1));
-  const rowW   = maxPerLevel * nodeW + (maxPerLevel - 1) * hGap;
 
   // 计算每个节点的中心坐标
   const coordMap = {};
   Object.entries(levelMap).forEach(([lv, nodesAtLevel]) => {
-    const y   = mt + (parseInt(lv) - 1) * (nodeH + vGap) + nodeH / 2;
+    const y   = startY + (parseInt(lv) - minLevel) * (nodeH + gap) + nodeH / 2;
     const n   = nodesAtLevel.length;
     const row = n * nodeW + (n - 1) * hGap;
     const startX = (W - row) / 2 + nodeW / 2;
@@ -80,7 +95,22 @@ export function renderFlowchart(config, W, H) {
     const y2   = to.y - nodeH / 2;
     const midY = (y1 + y2) / 2;
 
-    // 直角折线（内部包含箭头渲染）
+    // 回退边（目标在源上方，如「重新提交」）：走侧向回路，避免竖线穿过中间节点
+    const isBackward = y2 < y1 - 4;
+    if (isBackward) {
+      const goRight = from.x >= W * 0.5;
+      const sideX = goRight
+        ? Math.max(x1, x2) + nodeW / 2 + 48
+        : Math.min(x1, x2) - nodeW / 2 - 48;
+      shapes.push(sysOrthoLine(x1, y1, x2, y2, '#888', 1.8, { _loopback: true, _sideX: sideX }));
+
+      if (e.label) {
+        shapes.push(sysText(sideX + (goRight ? 10 : -10), (y1 + y2) / 2, e.label, 11, '#666', goRight ? 'left' : 'right'));
+      }
+      return;
+    }
+
+    // 正向折线（内部包含箭头渲染）
     shapes.push(sysOrthoLine(x1, y1, x2, y2));
 
     // 边标签：放在水平段中点处，向右偏移避免遮线
@@ -112,7 +142,7 @@ export function renderFlowchart(config, W, H) {
     }
 
     // 节点文字（白色，居中）
-    shapes.push(sysText(x, y, n.text, 13, '#fff'));
+    shapes.push(sysText(x, y, n.text, 13, '#333333'));
   });
 
   return shapes;
@@ -150,7 +180,7 @@ export function renderMindmap(config, W, H) {
     color: '#FF6B6B', lineWidth: 2.5,
     _nodeText: root,
   });
-  shapes.push(sysText(cx, cy, root, 15, '#fff'));
+  shapes.push(sysText(cx, cy, root, 15, '#333333'));
 
   // ── 一级分支 ──
   branches.forEach((branch, bi) => {
@@ -183,7 +213,7 @@ export function renderMindmap(config, W, H) {
       color, lineWidth: 2,
       _nodeText: branch.text,
     });
-    shapes.push(sysText(bx, by, branch.text, 13, '#fff'));
+    shapes.push(sysText(bx, by, branch.text, 13, '#333333'));
 
     // ── 二级分支 ──
     const children = branch.children || [];
@@ -223,7 +253,7 @@ export function renderMindmap(config, W, H) {
         color: cColor, lineWidth: 1.5,
         _nodeText: child,
       });
-      shapes.push(sysText(cx2, cy2, child, 12, '#fff'));
+      shapes.push(sysText(cx2, cy2, child, 12, '#333333'));
     });
   });
 
