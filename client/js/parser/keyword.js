@@ -95,6 +95,11 @@ export function parseCommand(text) {
   const llmResult = parseLLMIntent(text, original);
   if (llmResult) return llmResult;
 
+  // 0.5 关闭帮助面板（须在 help 检测之前，避免「关闭帮助」误触发打开）
+  if (text.includes('关闭') || text.includes('关掉') || text === '关') {
+    return { type: 'closeHelp' };
+  }
+
   // 1. 帮助指令
   if (text.includes('帮助') || text.includes('我能说什么') || text.includes('怎么用') || text.includes('指令')) {
     return { type: 'help' };
