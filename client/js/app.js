@@ -52,11 +52,10 @@ class VoiceDrawApp {
     this.taskList = new TaskListUI(document.getElementById('taskList'));
     this.toast = new Toast(document.getElementById('toastContainer'));
 
-    // 设置波形尺寸
-    const waveContainer = document.getElementById('waveformContainer');
-    if (waveContainer) {
-      this.waveform.resize(waveContainer.clientWidth, waveContainer.clientHeight);
-    }
+    this._waveContainer = document.getElementById('waveformContainer');
+    this._resizeWaveform();
+
+    window.addEventListener('resize', () => this._resizeWaveform());
 
     // 连接语音服务
     this._initVoice();
@@ -65,6 +64,13 @@ class VoiceDrawApp {
     this._initStatusUI();
 
     console.log('[VoiceDraw] Ready');
+  }
+
+  /**
+   * 同步底部波形容器尺寸
+   */
+  _resizeWaveform() {
+    this.waveform?.resizeToContainer(this._waveContainer);
   }
 
   /**

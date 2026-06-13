@@ -11,6 +11,7 @@ class VoiceRecorder {
     this.mediaStream = null;
     this.audioContext = null;
     this.scriptProcessor = null;
+    this.silentGain = null;
     this.reconnectTimer = null;
     this.isConnecting = false;
     this.silenceTimer = null;
@@ -121,7 +122,11 @@ class VoiceRecorder {
       };
 
       source.connect(this.scriptProcessor);
-      this.scriptProcessor.connect(this.audioContext.destination);
+      // 静音输出：ScriptProcessor 必须连到 destination 才能跑，但不能播到扬声器（避免 ASR 回声叠音）
+      this.silentGain = this.audioContext.createGain();
+      this.silentGain.gain.value = 0;
+      this.scriptProcessor.connect(this.silentGain);
+      this.silentGain.connect(this.audioContext.destination);
 
       store.set('isListening', true);
       this.onStatusChange?.('listening');
@@ -140,6 +145,11 @@ class VoiceRecorder {
     if (this.scriptProcessor) {
       this.scriptProcessor.disconnect();
       this.scriptProcessor = null;
+    }
+
+    if (this.silentGain) {
+      this.silentGain.disconnect();
+      this.silentGain = null;
     }
 
     if (this.audioContext) {

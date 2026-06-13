@@ -12,6 +12,8 @@ export class WaveformVisualizer {
     this.animationId = null;
     this.isActive = false;
     this.barCount = 32;
+    this.logicalWidth = 0;
+    this.logicalHeight = 0;
     this.colors = {
       active: '#4ECDC4',
       inactive: '#E0E0E0',
@@ -70,12 +72,12 @@ export class WaveformVisualizer {
    */
   _drawWaveform() {
     const ctx = this.ctx;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
+    const w = this.logicalWidth;
+    const h = this.logicalHeight;
+    if (!w || !h) return;
 
     ctx.clearRect(0, 0, w, h);
 
-    // 背景
     ctx.fillStyle = this.colors.bg;
     ctx.fillRect(0, 0, w, h);
 
@@ -89,13 +91,11 @@ export class WaveformVisualizer {
       const x = i * (barWidth + gap) + gap / 2;
       const y = (h - barHeight) / 2;
 
-      // 渐变色
       const gradient = ctx.createLinearGradient(x, y, x, y + barHeight);
       gradient.addColorStop(0, this.colors.active);
       gradient.addColorStop(1, '#45B7D1');
       ctx.fillStyle = gradient;
 
-      // 圆角矩形
       ctx.beginPath();
       ctx.roundRect(x, y, barWidth, barHeight, 2);
       ctx.fill();
@@ -107,8 +107,9 @@ export class WaveformVisualizer {
    */
   _drawIdle() {
     const ctx = this.ctx;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
+    const w = this.logicalWidth;
+    const h = this.logicalHeight;
+    if (!w || !h) return;
 
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = this.colors.bg;
@@ -130,15 +131,34 @@ export class WaveformVisualizer {
   }
 
   /**
-   * 设置尺寸
+   * 设置尺寸（CSS 逻辑像素，与 renderer.js 一致）
    */
   resize(width, height) {
     const dpr = window.devicePixelRatio || 1;
+    this.logicalWidth = width;
+    this.logicalHeight = height;
     this.canvas.width = width * dpr;
     this.canvas.height = height * dpr;
-    this.ctx.scale(dpr, dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.canvas.style.width = width + 'px';
     this.canvas.style.height = height + 'px';
+
+    if (this.isActive) {
+      this._drawWaveform();
+    } else {
+      this._drawIdle();
+    }
+  }
+
+  /**
+   * 根据容器元素同步尺寸
+   */
+  resizeToContainer(containerEl) {
+    if (!containerEl) return;
+    const rect = containerEl.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      this.resize(rect.width, rect.height);
+    }
   }
 }
 
