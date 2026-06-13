@@ -5,7 +5,7 @@
 
 import store from '../state/store.js';
 import { drawShape, drawSelection, drawLabel } from './shapes.js';
-import { drawGrid } from './grid.js';
+import { drawGrid, drawPositionHints } from './grid.js';
 
 class Renderer {
   constructor(canvasEl) {
@@ -59,9 +59,10 @@ class Renderer {
     ctx.fillStyle = '#F8F9FB';
     ctx.fillRect(0, 0, w, h);
 
-    // 绘制网格背景
+    // 绘制网格背景 + 九宫格方位提示
     if (this.showGrid) {
       drawGrid(ctx, w, h);
+      drawPositionHints(ctx, w, h);
     }
 
     // 绘制所有正式对象

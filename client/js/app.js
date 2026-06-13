@@ -748,14 +748,22 @@ class VoiceDrawApp {
   }
 
   _execSelect(command) {
-    const obj = store.getObjectByNumber(command.target.value);
+    const num = command.target?.value;
+    if (num == null) {
+      const msg = '请说「选中3号」指定对象编号';
+      voiceSynth.speak(msg);
+      this.toast.warning(msg);
+      return null;
+    }
+
+    const obj = store.getObjectByNumber(num);
 
     if (obj) {
       store.selectObject(obj.id);
       return obj;
     }
 
-    const msg = `未找到 ${command.target.value} 号对象，请说「选中3号」指定编号`;
+    const msg = `未找到 ${num} 号对象，请说「选中3号」指定编号`;
     voiceSynth.speak(msg);
     this.toast.warning(msg);
     return null;
