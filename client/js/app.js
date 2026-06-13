@@ -641,6 +641,10 @@ class VoiceDrawApp {
         feedback = '画布已清除';
         break;
 
+      case 'export':
+        this._execExport();
+        return;
+
       case 'help':
         this._execHelp();
         return;
@@ -967,6 +971,25 @@ class VoiceDrawApp {
       this.toast.info('帮助面板未打开');
     }
     return true;
+  }
+
+  /**
+   * 导出画布为 PNG 图片（无节点编号 / 无网格 / 纯白背景）
+   */
+  _execExport() {
+    if (store.state.objects.length === 0) {
+      voiceSynth.speak('画布是空的，没有内容可以导出');
+      this.toast.warning('画布是空的，没有内容可以导出');
+      return;
+    }
+    try {
+      this.renderer.exportImage();
+      voiceSynth.speak('图片已导出');
+      this.toast.success('✅ 图片已导出，请查看下载文件夹', 3000);
+    } catch (e) {
+      console.error('[VoiceDraw] Export error:', e);
+      this.toast.error(`导出失败: ${e.message}`, 3000);
+    }
   }
 
   async _execCompound(command) {

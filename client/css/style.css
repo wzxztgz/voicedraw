@@ -140,6 +140,18 @@ body {
   user-select: none;
 }
 
+.btn-export {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: default;
+  pointer-events: none;
+  user-select: none;
+}
+
 /* ========== Main Content ========== */
 #mainContent {
   flex: 1;
@@ -158,6 +170,8 @@ body {
   height: 100%;
   display: block;
   cursor: default;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* ========== Task List ========== */
@@ -181,7 +195,7 @@ body {
 .task-list.visible {
   opacity: 1;
   transform: translateX(0);
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .task-header {
@@ -375,12 +389,8 @@ body {
   font-size: 11px;
   color: var(--text-secondary);
   cursor: default;
-  transition: all var(--transition);
-}
-
-.hint-tag:hover {
-  border-color: var(--primary);
-  color: var(--primary);
+  pointer-events: none;
+  user-select: none;
 }
 
 /* ========== Toast ========== */
@@ -410,7 +420,7 @@ body {
   opacity: 0;
   transform: translateY(-10px);
   transition: all 0.3s ease;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .toast-visible {

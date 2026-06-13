@@ -304,7 +304,12 @@ export function parseCommand(text) {
     return { type: 'cancel' };
   }
 
-  // 4. 清除画布
+  // 4. 导出图片
+  if (text.includes('导出') || text.includes('保存图片') || text.includes('下载图片') || text.includes('导出图片')) {
+    return { type: 'export' };
+  }
+
+  // 5. 清除画布
   if (text.includes('清除') || text.includes('清空') || text.includes('全部删除') || text.includes('重新开始')) {
     return { type: 'clear' };
   }
@@ -1095,6 +1100,7 @@ function _assessConfidence(command, signals) {
     case 'undo':
     case 'redo':
     case 'clear':
+    case 'export':
     case 'help':
     case 'closeHelp':
     case 'confirm':

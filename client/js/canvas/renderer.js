@@ -118,6 +118,41 @@ class Renderer {
   }
 
   /**
+   * 导出画布为 PNG 图片并下载
+   * 导出时：
+   *   - 使用白色纯净背景（不含网格 / 方位提示）
+   *   - 不绘制节点编号标签（drawLabel 跳过）
+   *   - 不绘制选中高亮 / 预览对象
+   *   - 保持与屏幕相同的 DPR，确保高清
+   */
+  exportImage() {
+    const { objects, canvasWidth: w, canvasHeight: h } = store.state;
+
+    const dpr = window.devicePixelRatio || 1;
+    const off = document.createElement('canvas');
+    off.width  = w * dpr;
+    off.height = h * dpr;
+    const ctx = off.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // 纯白背景
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+
+    // 绘制所有图形，跳过 drawLabel（节点编号）和 drawSelection
+    for (const obj of objects) {
+      drawShape(ctx, obj, false);
+    }
+
+    // 触发下载
+    const link = document.createElement('a');
+    const ts   = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+    link.download = `voicedraw-${ts}.png`;
+    link.href = off.toDataURL('image/png');
+    link.click();
+  }
+
+  /**
    * 获取画布逻辑尺寸（CSS 像素）
    */
   getSize() {
