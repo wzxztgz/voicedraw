@@ -256,9 +256,8 @@ function drawRoundedRect(ctx, shape) {
  * 箭头以实心三角形绘制在终点处，方向跟随最后一段路径
  */
 function drawOrtho(ctx, shape) {
-  const { x, y, x2, y2, color, lineWidth } = shape;
-  const midY = (y + y2) / 2;
-  const isStraight = Math.abs(x - x2) < 2;
+  const { x, y, x2, y2, color, lineWidth, _sideX, _loopback } = shape;
+  const stub = 16;
 
   ctx.save();
   ctx.strokeStyle = color || '#888';
@@ -266,11 +265,43 @@ function drawOrtho(ctx, shape) {
   ctx.lineJoin    = 'round';
   ctx.lineCap     = 'round';
 
-  // 折线路径
+  // 回退边：经侧道绕行（下→侧→上→水平接入），不画穿节点的直线
+  if (_loopback || y2 < y - 4) {
+    const sideX = _sideX ?? Math.min(x, x2) - 80;
+    const arrowH = 10;
+    const laneGap = 12; // 水平段与箭头翼顶之间的竖向间距
+    const laneY = y2 - arrowH - laneGap;
+
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x, y + stub);
+    ctx.lineTo(sideX, y + stub);
+    ctx.lineTo(sideX, laneY);
+    ctx.lineTo(x2, laneY);
+    ctx.lineTo(x2, y2 - arrowH);
+    ctx.stroke();
+
+    // 箭头向下进入目标顶边
+    const dir = 1;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - 6, y2 - 10 * dir);
+    ctx.lineTo(x2 + 6, y2 - 10 * dir);
+    ctx.closePath();
+    ctx.fillStyle = color || '#888';
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  const midY = (y + y2) / 2;
+  const isStraight = Math.abs(x - x2) < 2;
+
+  // 折线路径（正向）
   ctx.beginPath();
   ctx.moveTo(x, y);
   if (isStraight) {
-    ctx.lineTo(x2, y2 - 9); // 直线，留出箭头空间
+    ctx.lineTo(x2, y2 - 9);
   } else {
     ctx.lineTo(x, midY);
     ctx.lineTo(x2, midY);
@@ -278,7 +309,6 @@ function drawOrtho(ctx, shape) {
   }
   ctx.stroke();
 
-  // 实心箭头三角形（始终指向 y2 方向）
   const dir = y2 >= (isStraight ? y : midY) ? 1 : -1;
   ctx.beginPath();
   ctx.moveTo(x2, y2);
@@ -310,7 +340,6 @@ export function drawSelection(ctx, shape) {
  * 绘制序号标签
  * - _system: true → 不显示（坐标轴、装饰文字等）
  * - _barLabel → 在图形下方显示数据标签（柱子、折线点）
- * - _nodeText → 节点文字已由 sysText 覆盖，不重复显示 ID
  */
 export function drawLabel(ctx, shape) {
   // 系统装饰元素（坐标轴、流程图连线等）不显示序号
