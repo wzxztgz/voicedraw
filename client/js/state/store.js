@@ -123,7 +123,35 @@ class Store {
   }
 
   /**
-   * 更新图形对象
+   * 批量添加图形对象（LLM 图表/流程图用）
+   * 整批作为一次历史记录，支持一次性撤销整张图。
+   *
+   * ID 分配顺序：可交互对象（柱子/节点/数据点）优先获得连续编号，
+   * 系统装饰元素（坐标轴、标签、标题）排在后面，避免浪费用户可见的 ID。
+   * 例如柱状图 3 根柱子在空画布上会得到 1、2、3 号。
+   */
+  addBatch(shapes) {
+    this.pushHistory();
+    // 可交互对象优先，系统装饰元素排后
+    const interactive = shapes.filter((s) => !s._system && s.type !== 'text');
+    const decorative  = shapes.filter((s) =>  s._system || s.type === 'text');
+    const ordered = [...interactive, ...decorative];
+
+    const added = [];
+    for (const shape of ordered) {
+      const obj = { id: this._state.nextId++, ...shape };
+      this._state.objects.push(obj);
+      added.push(obj);
+    }
+    this.set('objects', [...this._state.objects]);
+    // 选中第一个可交互对象
+    const first = added.find((o) => !o._system && o.type !== 'text');
+    if (first) this.set('selectedId', first.id);
+    return added;
+  }
+
+  /**
+   * 更新图形对象（推入历史）
    */
   updateObject(id, updates) {
     this.pushHistory();
@@ -135,11 +163,29 @@ class Store {
   }
 
   /**
-   * 删除图形对象
+   * 静默更新图形对象（不推入历史）
+   * 用于移动时同步子文字和连线端点，避免产生多余历史快照。
+   * 撤销时，主对象的历史快照里已包含关联对象的旧位置，可一次性还原。
+   */
+  updateObjectNoHistory(id, updates) {
+    const idx = this._state.objects.findIndex((o) => o.id === id);
+    if (idx !== -1) {
+      this._state.objects[idx] = { ...this._state.objects[idx], ...updates };
+      this.set('objects', [...this._state.objects]);
+    }
+  }
+
+  /**
+   * 删除图形对象，同时级联删除以该对象为端点的连线（_fromId / _toId）
+   * 整批在同一个历史快照内，撤销时一次性还原。
    */
   removeObject(id) {
     this.pushHistory();
     this._state.objects = this._state.objects.filter((o) => o.id !== id);
+    // 移除以已删除对象为任意端点的孤立连线
+    this._state.objects = this._state.objects.filter(
+      (o) => !(o._fromId === id || o._toId === id)
+    );
     this.set('objects', [...this._state.objects]);
     if (this._state.selectedId === id) {
       this.set('selectedId', null);

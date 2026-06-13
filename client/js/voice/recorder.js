@@ -197,6 +197,22 @@ class VoiceRecorder {
       case 'pong':
         break;
 
+      case 'llm-result':
+        this.onLLMResult?.(msg.data);
+        break;
+
+      case 'llm-error':
+        this.onLLMError?.(msg.error);
+        break;
+
+      case 'llm-parse-result':
+        this.onLLMParseResult?.(msg.data);
+        break;
+
+      case 'llm-parse-error':
+        this.onLLMParseError?.(msg.error);
+        break;
+
       default:
         console.log('[VoiceRecorder] Unknown message:', msg.type);
     }
@@ -289,6 +305,24 @@ class VoiceRecorder {
       binary += String.fromCharCode(bytes[i]);
     }
     return btoa(binary);
+  }
+
+  /**
+   * 发送 LLM 绘图请求到后端
+   * @param {string} prompt           - 用户语音指令（可能是多句积累后的完整描述）
+   * @param {string|null} sessionId   - 会话 ID（描述模式下传入，后端凭此携带历史）
+   */
+  sendLLMDraw(prompt, sessionId = null) {
+    this._send({ type: 'llm-draw', prompt, sessionId });
+  }
+
+  /**
+   * 发送基础指令 LLM 兜底解析请求
+   * 当规则引擎返回 unknown 时调用，让 LLM 尝试理解用户意图。
+   * @param {string} text - 用户语音原文
+   */
+  sendLLMParse(text) {
+    this._send({ type: 'llm-parse', text });
   }
 
   /**

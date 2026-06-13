@@ -17,6 +17,15 @@ const HOMOPHONE_MAP = {
   '椭圆': '椭圆', '托圆': '椭圆',
   '撤小': '撤销', '撤锁': '撤销',
   '重座': '重做', '虫做': '重做',
+  // "清空"同音词（ASR 对 qīng kōng 的常见误识别）
+  '晴空': '清空', '星空': '清空', '天空': '清空',
+  // 颜色同音词
+  '绿色': '绿色', '录色': '绿色', '陆色': '绿色',
+  '红色': '红色', '洪色': '红色',
+  '黄色': '黄色', '皇色': '黄色',
+  // 操作动词同音词
+  '画个': '画一个', '花一个': '画一个', '花个': '画一个',
+  '撤回': '撤销',
 };
 
 /**
@@ -35,11 +44,55 @@ function correctHomophones(text) {
  * @param {string} text - 语音识别文本
  * @returns {object|null} 解析后的指令
  */
+/**
+ * 复杂信号检测
+ * 判断一句话在结构上是否属于「多动作复合指令」。
+ * 返回 true 时上层会主动路由到 LLM，而不是等规则引擎误判成单条指令。
+ *
+ * 触发条件（满足任意一条）：
+ *   1. 含复合分隔词（先/然后/接着/最后/并且/还要/之后）
+ *   2. 句中出现 ≥2 个绘制动词（如"画…画…"）
+ *   3. 句中出现 ≥2 种不同形状词（如同时含"圆"和"矩形"）
+ *   4. 长句（>20字）且含至少一个绘制动词（口语化多步指令）
+ *
+ * 不触发：「再画一个圆」（以"再"开头的微调/续画），交给 parseRefine/parseDraw 处理。
+ */
+export function hasComplexSignal(text) {
+  // 条件1：分隔词
+  const separators = ['先', '然后', '接着', '最后', '并且', '还要', '之后', '随后', '紧接着', '接下来'];
+  // "再"只在非句首时才算分隔词，以免误判"再大一点"
+  if (separators.some((s) => text.includes(s))) return true;
+  if (!text.startsWith('再') && text.includes('再')) return true;
+
+  // 条件2：≥2 个绘制动词
+  const drawVerbs = ['画', '绘制', '创建', '新建', '添加', '生成'];
+  const drawVerbCount = drawVerbs.reduce((n, v) => n + (text.split(v).length - 1), 0);
+  if (drawVerbCount >= 2) return true;
+
+  // 条件3：≥2 种不同形状词
+  const shapeWords = ['圆', '矩形', '方形', '方块', '直线', '线段', '三角', '星形', '星星', '椭圆'];
+  const matchedShapes = shapeWords.filter((s) => text.includes(s));
+  const uniqueShapes = new Set(matchedShapes.map((s) => {
+    if (s === '方形' || s === '方块') return 'rect';
+    if (s === '星形' || s === '星星') return 'star';
+    if (s === '线段') return 'line';
+    return s;
+  }));
+  if (uniqueShapes.size >= 2) return true;
+
+  return false;
+}
+
 export function parseCommand(text) {
   const original = text;
   text = correctHomophones(text.trim().toLowerCase());
 
   console.log(`[Parser] 原始: "${original}" → 纠正: "${text}"`);
+
+  // 0. LLM 复杂图形意图检测（图表/流程图/思维导图/复杂图形）
+  //    满足条件就跳过后续所有硬解析，直接交给 LLM 处理
+  const llmResult = parseLLMIntent(text, original);
+  if (llmResult) return llmResult;
 
   // 1. 帮助指令
   if (text.includes('帮助') || text.includes('我能说什么') || text.includes('怎么用') || text.includes('指令')) {
@@ -71,6 +124,15 @@ export function parseCommand(text) {
     return { type: 'redo' };
   }
 
+  // 6.5 复合指令（先...然后.../再...）
+  // ★ 必须在 parseDraw 等单条解析之前，防止整句被单条规则"误判成功"。
+  //   parseCompound 内部递归调 parseCommand 解析子句，不会二次进入此分支。
+  //   "再..." 以句首开头时先让步骤 7 的 parseRefine 处理（微调/续画语义）。
+  if (!text.startsWith('再') && !text.startsWith('继续')) {
+    const compoundResult = parseCompound(text);
+    if (compoundResult) return compoundResult;
+  }
+
   // 7. "再..." 微调指令
   // 注意：若同时含有绘制动词+形状（如"再画一个圆"），优先走 parseDraw，
   // 否则 parseRefine 会静默失败（_execRefine 不处理 draw 类型）
@@ -89,6 +151,28 @@ export function parseCommand(text) {
   const deleteResult = parseDelete(text);
   if (deleteResult) return deleteResult;
 
+  // 8.6 连线指令（"用线连接1号和3号" / "把2号连到4号"）
+  const connectResult = parseConnect(text);
+  if (connectResult) return connectResult;
+
+  // 8.7 添加文字标注（"在2号右边加文字：已审批" / "写上标题"）
+  const addTextResult = parseAddText(text);
+  if (addTextResult) return addTextResult;
+
+  // 8.8 修改文字内容（"把3号文字改成已完成"）—— 必须在颜色修改前，防止被拦截
+  const modifyTextResult = parseModifyText(text);
+  if (modifyTextResult) return modifyTextResult;
+
+  // 8.9 批量指令（"画三个圆" / "把所有圆改成蓝色"）
+  //     必须在单条 draw/color 之前，防止只解析出一个图形
+  const batchResult = parseBatch(text);
+  if (batchResult) return batchResult;
+
+  // 8.95 形状变更指令（"改成矩形" / "换成圆形" / "变成三角形"）
+  //      必须在颜色修改前，防止"改成红色"被误拦（颜色修改要求颜色词，互不冲突）
+  const shapeChangeResult = parseShapeChange(text);
+  if (shapeChangeResult) return shapeChangeResult;
+
   // 9. 颜色修改指令
   const colorResult = parseColorChange(text);
   if (colorResult) return colorResult;
@@ -104,10 +188,6 @@ export function parseCommand(text) {
   // 12. 位置移动指令
   const moveResult = parseMove(text);
   if (moveResult) return moveResult;
-
-  // 13. 复合指令（包含 "先...然后..." 或 "再..."）
-  const compoundResult = parseCompound(text);
-  if (compoundResult) return compoundResult;
 
   // 未识别
   return { type: 'unknown', text };
@@ -138,7 +218,15 @@ function parseDraw(text) {
   if (!shapeType) return null;
 
   // 必须包含明确的绘制动词才触发
-  const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成', '来个', '来一个', '整个', '整一个', '加个', '加一个', '做个', '做一个', '弄个', '弄一个'];
+  const drawVerbs = [
+    '画', '绘制', '绘画', '新建', '创建', '添加', '生成',
+    '来个', '来一个', '整个', '整一个', '加个', '加一个',
+    '做个', '做一个', '弄个', '弄一个',
+    // 口语化表达扩充
+    '搞个', '搞一个', '要个', '要一个', '给我画', '给我一个',
+    '帮我画', '帮我整', '帮我做', '搞出', '整出', '弄出',
+    '来一', '整一', '画出', '弄一', '搞一',
+  ];
   if (!drawVerbs.some((v) => text.includes(v))) return null;
 
   // 提取颜色
@@ -150,13 +238,25 @@ function parseDraw(text) {
     }
   }
 
-  // 提取大小
+  // 提取大小 —— 先去掉"大小""不大不小""合适大小"等中性词，防止误判
   let sizeModifier = null;
-  if (text.includes('大')) sizeModifier = 'large';
-  else if (text.includes('小')) sizeModifier = 'small';
+  const sizeText = text.replace(/大小|不大不小|合适大小|适中大小|适当大小/g, '');
+  if (sizeText.includes('大') || sizeText.includes('巨')) sizeModifier = 'large';
+  else if (sizeText.includes('小')) sizeModifier = 'small';
 
-  // 提取位置（如"在右上角画一个三角形"）
-  const position = parsePosition(text);
+  // 检测相对位置（"在1号右边画圆" / "在3号上方画矩形"）
+  // 优先级高于绝对位置
+  const relMatch = text.match(/在\s*(\d+|[一二三四五六七八九十]+)\s*号\s*(右边|左边|上面|下面|上方|下方|左方|右方|右侧|左侧|旁边)/);
+  let relativeToId = null;
+  let relativeSide = null;
+  if (relMatch) {
+    const numStr = relMatch[1];
+    relativeToId = parseInt(numStr) || chineseNumToInt(numStr);
+    relativeSide = parseSide(relMatch[2]);
+  }
+
+  // 绝对位置（"在右上角画圆"，无相对目标时使用）
+  const position = relativeToId ? null : parsePosition(text);
 
   return {
     type: 'draw',
@@ -164,6 +264,8 @@ function parseDraw(text) {
     color,
     sizeModifier,
     position,
+    relativeToId,
+    relativeSide,
   };
 }
 
@@ -219,7 +321,15 @@ function parseSelect(text) {
     const hasSelectVerb = text.includes('选中') || text.includes('选择') || text.includes('点击');
     // 含有操作动词（移/改/放大等）但无选中词 → 这是针对目标的操作指令，不是选中指令
     // 交给 parseMove / parseColorChange / parseSizeChange 处理（它们会通过 extractTarget 获取目标）
-    const hasActionVerb = ['移', '放大', '缩小', '变大', '变小', '改成', '变成', '换成', '调成', '删除', '删掉', '移除', '去掉', '擦掉', '擦除'].some((v) => text.includes(v));
+    const hasActionVerb = [
+      '移', '放大', '缩小', '变大', '变小',
+      '改成', '变成', '换成', '改为', '变为', '换为', '调成', '修改', '调整',
+      '删除', '删掉', '移除', '去掉', '擦掉', '擦除',
+      '连接', '连线', '连到', '相连',          // 连线指令
+      '画', '绘制', '新建', '创建',             // 绘制（"在1号右边画圆"）
+      '加文字', '添加文字', '写上', '标注',     // 文字标注
+      '将', '把',                               // "将1号改为红色" / "把3号变成蓝色"
+    ].some((v) => text.includes(v));
     if (hasActionVerb && !hasSelectVerb) {
       // 不拦截，让操作解析器处理
     } else {
@@ -247,7 +357,9 @@ function parseSelect(text) {
     }
 
     if (shapeType) {
-      return { type: 'select', target: { type: 'shape', shapeType } };
+      // 同时携带位置信息（"选中左上角的圆"），供执行层按距离就近选
+      const position = parsePosition(text);
+      return { type: 'select', target: { type: 'shape', shapeType, position } };
     }
   }
 
@@ -268,13 +380,155 @@ function parseDelete(text) {
 }
 
 /**
+ * 提取文本中所有编号（阿拉伯数字 + 中文数字）
+ * 用于连线等需要两个 ID 的指令
+ */
+function extractAllNumbers(text) {
+  const results = [];
+  const seen = new Set();
+
+  const arabicRe = /(?:第\s*(\d+)|(\d+)\s*号)/g;
+  let m;
+  while ((m = arabicRe.exec(text)) !== null) {
+    const n = parseInt(m[1] ?? m[2]);
+    if (!seen.has(n)) { seen.add(n); results.push(n); }
+  }
+
+  const CN = '[一二三四五六七八九]';
+  const chRe = new RegExp(`(?:第\\s*(二十|十${CN}|${CN}十?|十)\\s*[个号]?|(二十|十${CN}|${CN}|十)\\s*号)`, 'g');
+  while ((m = chRe.exec(text)) !== null) {
+    const raw = m[1] ?? m[2];
+    const n = chineseNumToInt(raw);
+    if (n !== null && !seen.has(n)) { seen.add(n); results.push(n); }
+  }
+  return results;
+}
+
+/**
+ * 提取方位词（用于相对位置描述和文字标注定位）
+ */
+/**
+ * 提取方位词
+ * 无明确方位时返回 null（由调用方决定默认行为）
+ * parseDraw 的相对位置匹配在 regex 里已确保有方位词，不受影响
+ */
+function parseSide(text) {
+  if (text.includes('右边') || text.includes('右方') || text.includes('右侧') || text.includes('右面') || text.includes('旁边')) return 'right';
+  if (text.includes('左边') || text.includes('左方') || text.includes('左侧') || text.includes('左面')) return 'left';
+  if (text.includes('上方') || text.includes('上边') || text.includes('上侧')) return 'above';
+  if (text.includes('下面') || text.includes('下方') || text.includes('下边') || text.includes('下侧')) return 'below';
+  // 无明确方位 → 返回 null（文字标注默认居中到图形内部）
+  return null;
+}
+
+/**
+ * 解析连线指令
+ * "用线连接1号和3号" / "把2号连到4号" / "连接1号和2号"
+ */
+function parseConnect(text) {
+  const connectVerbs = ['连接', '连线', '连到', '相连', '连起来', '串联', '连上'];
+  if (!connectVerbs.some((v) => text.includes(v))) return null;
+
+  const nums = extractAllNumbers(text);
+  if (nums.length < 2) return null;
+
+  return { type: 'connect', fromId: nums[0], toId: nums[1] };
+}
+
+/**
+ * 解析添加文字标注指令
+ * "在2号右边加文字：已审批" / "写上标题" / "标注完成"
+ */
+function parseAddText(text) {
+  const textVerbs = ['加文字', '添加文字', '写上', '标注', '加标注', '加注', '添加注释', '加一段文字', '写文字'];
+  if (!textVerbs.some((v) => text.includes(v))) return null;
+
+  // 提取内容：冒号后的文字优先，否则取动词之后的内容
+  let content = '';
+  const colonMatch = text.match(/[：:]\s*(.+)$/);
+  if (colonMatch) {
+    content = colonMatch[1].trim();
+  } else {
+    for (const verb of textVerbs) {
+      const idx = text.indexOf(verb);
+      if (idx !== -1) {
+        content = text.slice(idx + verb.length).replace(/^[的说叫：:，,\s]+/, '').trim();
+        break;
+      }
+    }
+  }
+  if (!content) return null;
+
+  // 提取关联对象编号（冒号/内容前的编号）
+  const searchZone = colonMatch ? text.slice(0, text.lastIndexOf('：') === -1 ? text.lastIndexOf(':') : text.lastIndexOf('：')) : text;
+  const refId = extractNumber(searchZone);
+
+  // 提取方位
+  const side = parseSide(text);
+
+  // 绝对位置（无关联对象时使用）
+  const position = !refId ? parsePosition(text) : null;
+
+  return { type: 'addText', content, refId, side, position };
+}
+
+/**
+ * 解析文字内容修改指令
+ * "把3号文字改成已完成" / "修改3号的字：新内容" / "3号文字换成待审核"
+ * 要求：含"文字"/"字"关键词 + 目标编号 + 修改动词 + 新内容
+ */
+function parseModifyText(text) {
+  // 必须含"文字"或"字体"，与颜色改变指令区分
+  if (!text.includes('文字') && !text.includes('字体') && !text.includes('文本')) return null;
+
+  const modVerbs = ['改成', '变成', '换成', '改为', '变为', '替换成', '替换为', '修改成', '改'];
+  if (!modVerbs.some((v) => text.includes(v))) return null;
+
+  const refId = extractNumber(text);
+  if (!refId) return null;
+
+  // 提取新内容：冒号后优先，其次取动词之后
+  let content = '';
+  const colonMatch = text.match(/[：:]\s*(.+)$/);
+  if (colonMatch) {
+    content = colonMatch[1].trim();
+  } else {
+    for (const verb of modVerbs) {
+      const idx = text.indexOf(verb);
+      if (idx !== -1) {
+        content = text.slice(idx + verb.length).replace(/^[的说叫，,\s]+/, '').trim();
+        if (content) break;
+      }
+    }
+  }
+  if (!content) return null;
+
+  return { type: 'modifyText', refId, content };
+}
+
+/**
  * 解析颜色修改指令
  * 必须包含明确的修改动词，避免绘制/描述指令误触发
  */
 function parseColorChange(text) {
   // 必须包含颜色修改动词
-  const colorChangeVerbs = ['改成', '变成', '换成', '调成', '改为', '变为', '换为', '改颜色', '变颜色', '换颜色', '换个', '改个', '颜色改', '颜色变', '颜色换', '改色', '变色', '换色', '修改颜色', '调整颜色'];
-  if (!colorChangeVerbs.some((v) => text.includes(v))) return null;
+  const colorChangeVerbs = [
+    '改成', '变成', '换成', '调成', '改为', '变为', '换为',
+    '改颜色', '变颜色', '换颜色', '换个', '改个',
+    '颜色改', '颜色变', '颜色换',
+    '改色', '变色', '换色', '修改颜色', '调整颜色',
+    // 口语化扩充
+    '涂成', '刷成', '染成', '填成', '给它变', '弄成', '整成',
+    // "将1号改为红色" / "把颜色改为蓝色"
+    '将', '把',
+  ];
+  // 含"将/把"时须同时含变更动词，避免"把圆画大"误触发
+  const hasChangeVerb = ['改成', '变成', '换成', '改为', '变为', '换为', '调成',
+    '涂成', '刷成', '染成', '弄成', '整成', '改色', '变色', '换色'].some((v) => text.includes(v));
+  const hasSetPrefix = text.includes('将') || text.includes('把');
+  const matchedVerb = colorChangeVerbs.some((v) => text.includes(v));
+  if (!matchedVerb) return null;
+  if (hasSetPrefix && !hasChangeVerb) return null;
 
   let color = null;
   let colorName = null;
@@ -297,9 +551,19 @@ function parseColorChange(text) {
  */
 function parseSizeChange(text) {
   // 放大类动词短语
-  const enlargeVerbs = ['放大', '变大', '调大', '改大', '大一点', '大一些', '大很多', '增大', '扩大', '大两倍', '大一倍'];
+  const enlargeVerbs = [
+    '放大', '变大', '调大', '改大', '大一点', '大一些', '大很多',
+    '增大', '扩大', '大两倍', '大一倍',
+    // 口语化扩充
+    '弄大', '整大', '搞大', '大点', '大些',
+  ];
   // 缩小类动词短语
-  const shrinkVerbs = ['缩小', '变小', '调小', '改小', '小一点', '小一些', '小很多', '减小', '压缩', '小一半', '小两倍'];
+  const shrinkVerbs = [
+    '缩小', '变小', '调小', '改小', '小一点', '小一些', '小很多',
+    '减小', '压缩', '小一半', '小两倍',
+    // 口语化扩充
+    '弄小', '整小', '搞小', '小点', '小些',
+  ];
 
   const isEnlarge = enlargeVerbs.some((v) => text.includes(v));
   const isShrink = shrinkVerbs.some((v) => text.includes(v));
@@ -364,6 +628,12 @@ function parseRefine(text) {
   // 复制上一步操作类型
   const refined = { ...lastAction, type: 'refine', originalText: text };
 
+  // 如果文本中指定了新的目标 ID（如"再把1号移到右边"），覆盖 target
+  const explicitTarget = extractTarget(text);
+  if (explicitTarget) {
+    refined.target = explicitTarget;
+  }
+
   // 如果文本中包含新的参数，覆盖
   if (text.includes('大') || text.includes('放大')) {
     refined.factor = 1.1;
@@ -383,10 +653,94 @@ function parseRefine(text) {
 }
 
 /**
+ * 解析批量指令
+ * 支持两类：
+ *   1. 批量绘制：画三个圆 / 画两个矩形
+ *   2. 批量颜色：把所有圆改成蓝色 / 全部改成红色
+ */
+function parseBatch(text) {
+  // ── 批量绘制 ──────────────────────────────
+  // 数字词 → 数量
+  const countMap = {
+    '两': 2, '二': 2, '2': 2,
+    '三': 3, '3': 3,
+    '四': 4, '4': 4,
+    '五': 5, '5': 5,
+    '六': 6, '6': 6,
+  };
+
+  const drawVerbs = ['画', '绘制', '新建', '创建', '生成', '来', '整', '搞', '加'];
+  const hasDrawVerb = drawVerbs.some((v) => text.includes(v));
+
+  if (hasDrawVerb) {
+    for (const [word, count] of Object.entries(countMap)) {
+      if (!text.includes(word)) continue;
+
+      // 确保数字词后面紧跟"个/条"等量词（避免误匹配"二月"等）
+      const qtyRe = new RegExp(`${word}\\s*[个条枚张]?`);
+      if (!qtyRe.test(text)) continue;
+
+      // 找形状
+      const shapeKeywords = [
+        ['ellipse', ['椭圆形', '椭圆']],
+        ['triangle', ['三角形', '三角']],
+        ['rect', ['矩形', '长方形', '正方形', '方形', '方块']],
+        ['line', ['直线', '线段', '线条', '线']],
+        ['star', ['五角星', '星形', '星星']],
+        ['circle', ['圆形', '圆圈', '圆']],
+      ];
+      let shapeType = null;
+      for (const [type, kws] of shapeKeywords) {
+        if (kws.some((kw) => text.includes(kw))) { shapeType = type; break; }
+      }
+      if (!shapeType) continue;
+
+      let color = null;
+      for (const [name, hex] of Object.entries(COLOR_MAP)) {
+        if (text.includes(name)) { color = hex; break; }
+      }
+
+      return { type: 'batch-draw', shape: shapeType, color, count };
+    }
+  }
+
+  // ── 批量颜色 ──────────────────────────────
+  const batchColorWords = ['所有', '全部', '全都', '都', '每个', '每一个'];
+  const hasBatchWord = batchColorWords.some((w) => text.includes(w));
+  if (!hasBatchWord) return null;
+
+  // 必须包含颜色修改动词
+  const colorChangeVerbs = ['改成', '变成', '换成', '调成', '改为', '变为', '涂成', '刷成', '染成', '弄成', '整成'];
+  if (!colorChangeVerbs.some((v) => text.includes(v))) return null;
+
+  let color = null;
+  for (const [name, hex] of Object.entries(COLOR_MAP)) {
+    if (text.includes(name)) { color = hex; break; }
+  }
+  if (!color) return null;
+
+  // 可选：限定形状类型（"把所有圆改成蓝色" 中的"圆"）
+  const shapeKeywords = [
+    ['ellipse', ['椭圆形', '椭圆']],
+    ['triangle', ['三角形', '三角']],
+    ['rect', ['矩形', '方形', '方块']],
+    ['line', ['直线', '线']],
+    ['star', ['星形', '星星', '星']],
+    ['circle', ['圆形', '圆']],
+  ];
+  let filterShape = null;
+  for (const [type, kws] of shapeKeywords) {
+    if (kws.some((kw) => text.includes(kw))) { filterShape = type; break; }
+  }
+
+  return { type: 'batch-color', color, filterShape };
+}
+
+/**
  * 解析复合指令
  */
 function parseCompound(text) {
-  const separators = ['先', '然后', '接着', '再', '最后'];
+  const separators = ['先', '然后', '接着', '最后'];
   let hasSeparator = false;
   for (const sep of separators) {
     if (text.includes(sep)) {
@@ -395,21 +749,102 @@ function parseCompound(text) {
     }
   }
 
+  // "再" 只在不以它开头时作为 compound 分隔符，
+  // 避免与 parseRefine（step 7）冲突
+  if (!hasSeparator && !text.startsWith('再') && text.includes('再')) {
+    hasSeparator = true;
+  }
+
   if (!hasSeparator) return null;
 
-  // 简单按分隔符拆分
-  const parts = text.split(/先|然后|接着|再|最后/).filter((s) => s.trim().length > 0);
+  // 按分隔符拆分（"再"在开头时不作分隔符）
+  const parts = text.split(/先|然后|接着|最后|(?<!^)再/).filter((s) => s.trim().length > 0);
   if (parts.length < 2) return null;
 
   const subTasks = parts.map((part) => parseCommand(part.trim()));
-  if (subTasks.some((t) => !t || t.type === 'unknown')) {
-    return null; // 有无法解析的子任务
-  }
+
+  // 只保留能识别的子任务，跳过 unknown（不再因为一句话而放弃整条指令）
+  // _skipped 记录被跳过的原始文本，供执行层给出提示
+  const validTasks = [];
+  const skipped = [];
+  parts.forEach((part, i) => {
+    const cmd = subTasks[i];
+    if (cmd && cmd.type !== 'unknown') {
+      validTasks.push(cmd);
+    } else {
+      skipped.push(part.trim());
+    }
+  });
+
+  if (validTasks.length < 2) return null;
 
   return {
     type: 'compound',
-    tasks: subTasks,
+    tasks: validTasks,
+    skipped,
   };
+}
+
+/**
+ * 解析形状变更指令
+ * "改成矩形" / "把圆换成三角形" / "变成椭圆"
+ * 要求：含变更动词 + 形状关键词；不含绘制动词（避免与 parseDraw 冲突）
+ */
+function parseShapeChange(text) {
+  const changeVerbs = ['改成', '变成', '换成', '改为', '变为', '换为', '换个形', '改个形'];
+  if (!changeVerbs.some((v) => text.includes(v))) return null;
+
+  // 必须含形状关键词（长词优先避免"圆"匹配"椭圆"内部）
+  const shapeKeywords = [
+    ['ellipse',  ['椭圆形', '椭圆']],
+    ['triangle', ['三角形', '三角']],
+    ['rect',     ['矩形', '长方形', '正方形', '方形', '方块']],
+    ['line',     ['直线', '线段', '线条']],
+    ['star',     ['五角星', '星形', '星星']],
+    ['circle',   ['圆形', '圆圈', '圆']],
+  ];
+
+  let shape = null;
+  for (const [type, keywords] of shapeKeywords) {
+    if (keywords.some((kw) => text.includes(kw))) { shape = type; break; }
+  }
+  if (!shape) return null;
+
+  // 含绘制动词 → 这是绘制指令，让 parseDraw 处理
+  const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成'];
+  if (drawVerbs.some((v) => text.includes(v))) return null;
+
+  // 可选：同时指定新颜色（"改成红色矩形"）
+  let color = null;
+  for (const [name, hex] of Object.entries(COLOR_MAP)) {
+    if (text.includes(name)) { color = hex; break; }
+  }
+
+  return { type: 'shapeChange', shape, color, target: extractTarget(text) };
+}
+
+/**
+ * LLM 意图检测
+ * 当指令中同时包含「绘制动词」和「复杂图形关键词」时，交由 LLM 解析
+ * 使用原始文本（含标点、大小写）作为 prompt，提高 LLM 理解质量
+ */
+function parseLLMIntent(text, original) {
+  const llmShapes = [
+    '柱状图', '折线图', '饼图', '条形图', '曲线图', '趋势图',
+    '流程图', '流程',            // "请假审批流程" 不带"图"字也能命中
+    '思维导图', '脑图', '导图',
+    '房子', '树', '花', '汽车', '地图',
+  ];
+  const drawVerbs = [
+    '画', '绘制', '生成', '创建', '新建', '做个', '来一个', '整一个', '帮我画',
+    '搞个', '搞一个', '要个', '要一个', '给我画', '帮我整', '帮我做',
+  ];
+  const hasLLMShape = llmShapes.some((k) => text.includes(k));
+  const hasDrawVerb = drawVerbs.some((v) => text.includes(v));
+  if (hasLLMShape && hasDrawVerb) {
+    return { type: 'llm-draw', prompt: original || text };
+  }
+  return null;
 }
 
 /**
@@ -424,7 +859,11 @@ export function detectKeywords(text) {
   const keywords = { color: null, colorName: null, shape: null, size: null, position: null, hasDrawIntent: false };
 
   // 检测绘制意图（必须包含这些词才触发预览）
-  const drawIntentWords = ['画', '绘制', '绘画', '新建', '创建', '添加', '加一个', '来一个', '画一个', '来个', '整一个'];
+  const drawIntentWords = [
+    '画', '绘制', '绘画', '新建', '创建', '添加',
+    '加一个', '来一个', '画一个', '来个', '整一个',
+    '搞个', '搞一个', '要个', '要一个', '给我画', '给我一个', '帮我画',
+  ];
   keywords.hasDrawIntent = drawIntentWords.some((w) => text.includes(w));
 
   // 检测颜色

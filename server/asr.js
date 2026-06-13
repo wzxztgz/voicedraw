@@ -160,10 +160,8 @@ class DashScopeASR {
               if (task.callbacks.onResult) {
                 task.callbacks.onResult(text, isFinal);
               }
-
-              if (isFinal && task.callbacks.onComplete) {
-                task.callbacks.onComplete();
-              }
+              // onComplete 仅在整个 ASR 会话结束（task-finished）时触发，
+              // 不在每个 sentence_end 时触发，语义更准确。
             }
           }
 

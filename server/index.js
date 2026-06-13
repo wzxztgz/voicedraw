@@ -37,6 +37,17 @@ function getASR() {
   return asrInstance;
 }
 
+// LLM 单例（跨请求保持会话历史）
+let llmInstance = null;
+
+function getLLM() {
+  if (!llmInstance) {
+    const LLMService = require('./llmService');
+    llmInstance = new LLMService({ apiKey: process.env.DASHSCOPE_API_KEY });
+  }
+  return llmInstance;
+}
+
 // 创建 HTTP 服务器（用于健康检查和静态文件）
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
@@ -166,6 +177,36 @@ wss.on('connection', (ws, req) => {
 
         case 'ping': {
           sendToClient(ws, 'pong', {});
+          break;
+        }
+
+        case 'llm-parse': {
+          // LLM 兜底指令解析：规则匹配 unknown 后，用 LLM 尝试理解语义
+          console.log(`[Server] LLM parse request from ${clientId}: ${msg.text}`);
+          try {
+            const llm = getLLM();
+            const result = await llm.parseBasicCommand(msg.text);
+            sendToClient(ws, 'llm-parse-result', { data: result });
+          } catch (err) {
+            console.error('[Server] LLM parse error:', err.message);
+            sendToClient(ws, 'llm-parse-error', { error: err.message });
+          }
+          break;
+        }
+
+        case 'llm-draw': {
+          // 调用通义千问将自然语言转化为绘图配置 JSON
+          // msg.sessionId 不为空时，携带多轮对话历史（描述模式积累的上下文）
+          const sessionId = msg.sessionId || null;
+          console.log(`[Server] LLM draw request from ${clientId}${sessionId ? ` [session:${sessionId}]` : ''}: ${msg.prompt}`);
+          try {
+            const llm = getLLM();
+            const result = await llm.generate(msg.prompt, sessionId);
+            sendToClient(ws, 'llm-result', { data: result, sessionId });
+          } catch (err) {
+            console.error('[Server] LLM error:', err.message);
+            sendToClient(ws, 'llm-error', { error: err.message });
+          }
           break;
         }
 
