@@ -858,7 +858,42 @@ class VoiceDrawApp {
     if (obj.ry) updates.ry = Math.max(10, obj.ry * command.factor);
 
     store.updateObject(obj.id, updates);
+    // 同步 LLM 图的连线端点到节点新边缘
+    this._syncResized(obj.id, updates);
     return obj;
+  }
+
+  /**
+   * 节点缩放后，将相邻 ortho/curve 线的对应端点移至节点新边缘。
+   * ortho 线端点约定：起点在 from 节点底部中心，终点在 to 节点顶部中心。
+   *
+   * @param {number} resizedId - 刚被缩放的节点 store ID
+   * @param {object} newProps  - 已写入的新尺寸属性 { width?, height?, radius?, rx?, ry? }
+   */
+  _syncResized(resizedId, newProps = {}) {
+    const node = store.getObjectById(resizedId);
+    if (!node) return;
+
+    // 计算节点新的半高（用于 ortho 线竖向端点偏移）
+    const halfH = (newProps.height ?? newProps.radius ?? node.height ?? node.radius ?? 52) / 2;
+    const halfRy = newProps.ry ?? node.ry ?? halfH;
+
+    for (const obj of store.state.objects) {
+      if (obj._edgeFromId !== resizedId && obj._edgeToId !== resizedId) continue;
+
+      const upd = {};
+      if (obj._edgeFromId === resizedId) {
+        // 起点：节点底部中心（ortho）或 ry 下边缘（curve）
+        upd.x  = node.x;
+        upd.y  = node.y + (obj.type === 'curve' ? halfRy : halfH);
+      }
+      if (obj._edgeToId === resizedId) {
+        // 终点：节点顶部中心（ortho）或 ry 上边缘（curve）
+        upd.x2 = node.x;
+        upd.y2 = node.y - (obj.type === 'curve' ? halfRy : halfH);
+      }
+      store.updateObjectNoHistory(obj.id, upd);
+    }
   }
 
   _execShapeChange(command) {
@@ -1151,12 +1186,12 @@ class VoiceDrawApp {
     if (!movedObj) return;
 
     for (const obj of store.state.objects) {
-      // 子文字：随父对象同步平移
+      // 子文字：随父对象同步平移（手绘文字标注 & LLM 图节点标签）
       if (obj._parentId === movedId) {
         store.updateObjectNoHistory(obj.id, { x: obj.x + dx, y: obj.y + dy });
       }
 
-      // 连线：重新计算两端边缘交点
+      // 手绘连线：重新计算两端边缘交点
       if (obj._fromId || obj._toId) {
         const isFrom = obj._fromId === movedId;
         const isTo   = obj._toId   === movedId;
@@ -1169,6 +1204,20 @@ class VoiceDrawApp {
         const p1 = getShapeEdgePoint(fromObj, toObj.x, toObj.y);
         const p2 = getShapeEdgePoint(toObj, fromObj.x, fromObj.y);
         store.updateObjectNoHistory(obj.id, { x: p1.x, y: p1.y, x2: p2.x, y2: p2.y });
+      }
+
+      // LLM 图结构边（ortho/curve）：平移对应端点，让折线跟随节点移动
+      // 一根线可能同时是 from 和 to（自环），分别处理
+      if (obj._edgeFromId === movedId || obj._edgeToId === movedId) {
+        const upd = {};
+        if (obj._edgeFromId === movedId) { upd.x  = obj.x  + dx; upd.y  = obj.y  + dy; }
+        if (obj._edgeToId   === movedId) { upd.x2 = obj.x2 + dx; upd.y2 = obj.y2 + dy; }
+        // curve 还需平移控制点，保持曲线形态
+        if (obj.type === 'curve') {
+          if (obj._edgeFromId === movedId) { upd.cx1 = obj.cx1 + dx; upd.cy1 = obj.cy1 + dy; }
+          if (obj._edgeToId   === movedId) { upd.cx2 = obj.cx2 + dx; upd.cy2 = obj.cy2 + dy; }
+        }
+        store.updateObjectNoHistory(obj.id, upd);
       }
     }
   }
@@ -1335,6 +1384,12 @@ class VoiceDrawApp {
 
     // 批量写入 store（一次性撤销）
     const added = store.addBatch(shapes);
+
+    // 建立 LLM 图结构关联：节点→标签（_parentId）、节点→连线（_edgeFromId/_edgeToId）
+    if (data.drawType === 'flowchart' || data.drawType === 'mindmap') {
+      this._linkGraphElements(added);
+    }
+
     const interactive = added.filter((o) => !o._system && o.type !== 'text');
     const typeName = typeNames[data.drawType] || '图形';
 
@@ -1344,6 +1399,50 @@ class VoiceDrawApp {
       : '';
     voiceSynth.speak(`已生成${typeName}`);
     this.toast.success(`✅ 已生成${typeName}${idHint}`, 4000);
+  }
+
+  // ========== LLM 图结构绑定 ==========
+
+  /**
+   * addBatch 后为 flowchart / mindmap 的各图形元素建立关联。
+   *
+   * flowchart.js 在生成阶段为每个元素附了临时键：
+   *   _tmpNodeId    : 节点形状（非 _system）
+   *   _tmpNodeLabel : 节点文字标签（_system text）
+   *   _tmpEdgeFrom  : 边起点节点的临时 ID
+   *   _tmpEdgeTo    : 边终点节点的临时 ID
+   *
+   * 本方法在拿到真实 store ID 后：
+   *   - 把 _tmpNodeLabel 的元素写入 _parentId → 随父节点平移
+   *   - 把连线写入 _edgeFromId / _edgeToId → 移动/删除节点时同步
+   *
+   * 全部用 updateObjectNoHistory，不产生额外历史快照。
+   */
+  _linkGraphElements(added) {
+    // tmp 节点 ID → 真实 store ID
+    const nodeMap = new Map();
+    for (const obj of added) {
+      if (obj._tmpNodeId != null) nodeMap.set(String(obj._tmpNodeId), obj.id);
+    }
+
+    for (const obj of added) {
+      const upd = {};
+      if (obj._tmpNodeLabel != null) {
+        const realId = nodeMap.get(String(obj._tmpNodeLabel));
+        if (realId != null) upd._parentId = realId;
+      }
+      if (obj._tmpEdgeFrom != null) {
+        const realId = nodeMap.get(String(obj._tmpEdgeFrom));
+        if (realId != null) upd._edgeFromId = realId;
+      }
+      if (obj._tmpEdgeTo != null) {
+        const realId = nodeMap.get(String(obj._tmpEdgeTo));
+        if (realId != null) upd._edgeToId = realId;
+      }
+      if (Object.keys(upd).length > 0) {
+        store.updateObjectNoHistory(obj.id, upd);
+      }
+    }
   }
 
   // ========== 辅助方法 ==========
