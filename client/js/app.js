@@ -748,31 +748,17 @@ class VoiceDrawApp {
   }
 
   _execSelect(command) {
-    let obj = null;
-
-    if (command.target.type === 'id') {
-      obj = store.getObjectByNumber(command.target.value);
-    } else if (command.target.type === 'shape') {
-      let candidates = store.state.objects.filter((o) => o.type === command.target.shapeType);
-      // 若解析出了位置信息（"选中左上角的圆"），按与目标位置的距离就近选
-      if (command.target.position && candidates.length > 1) {
-        const { canvasWidth: W, canvasHeight: H } = store.state;
-        const tc = positionToCoords(command.target.position, W, H);
-        candidates = candidates.slice().sort((a, b) =>
-          Math.hypot(a.x - tc.x, a.y - tc.y) - Math.hypot(b.x - tc.x, b.y - tc.y)
-        );
-      }
-      obj = candidates.length > 0 ? candidates[0] : null;
-    }
+    const obj = store.getObjectByNumber(command.target.value);
 
     if (obj) {
       store.selectObject(obj.id);
       return obj;
-    } else {
-      voiceSynth.speak('未找到指定对象');
-      this.toast.warning('未找到指定对象');
-      return null;
     }
+
+    const msg = `未找到 ${command.target.value} 号对象，请说「选中3号」指定编号`;
+    voiceSynth.speak(msg);
+    this.toast.warning(msg);
+    return null;
   }
 
   _execDelete(command) {

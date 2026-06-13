@@ -181,7 +181,7 @@ color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，
 
 删除：{"type":"delete","targetId":null}
 
-选中：{"type":"select","targetId":1}  （targetId 必须有值）
+选中：{"type":"select","targetId":1}  （targetId 必须有值；禁止用位置或形状描述选中，必须说编号）
 
 撤销/重做/清空：{"type":"undo"} | {"type":"redo"} | {"type":"clear"}
 
