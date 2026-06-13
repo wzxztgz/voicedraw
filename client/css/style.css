@@ -135,14 +135,9 @@ body {
   background: var(--surface);
   color: var(--text-secondary);
   font-size: 13px;
-  cursor: pointer;
-  transition: all var(--transition);
-}
-
-.btn-help:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: rgba(78, 205, 196, 0.05);
+  cursor: default;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* ========== Main Content ========== */
@@ -260,7 +255,7 @@ body {
 .help-panel.visible {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
-  pointer-events: auto;
+  pointer-events: none;
   visibility: visible;
 }
 
@@ -277,23 +272,11 @@ body {
   color: var(--text);
 }
 
-.btn-close {
-  width: 32px;
-  height: 32px;
-  border: none;
-  background: var(--bg);
-  border-radius: 50%;
-  font-size: 16px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all var(--transition);
-}
-
-.btn-close:hover {
-  background: var(--accent);
-  color: white;
+.help-voice-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  pointer-events: none;
+  user-select: none;
 }
 
 .help-content {

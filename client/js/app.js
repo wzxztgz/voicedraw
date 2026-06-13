@@ -43,6 +43,9 @@ class VoiceDrawApp {
   async init() {
     console.log('[VoiceDraw] Initializing...');
 
+    // 关闭 TTS 播报，避免 Demo 时扬声器声音被 ASR 误识别
+    voiceSynth.setEnabled(false);
+
     // 初始化 UI 组件
     this.renderer = new Renderer(document.getElementById('mainCanvas'));
     this.waveform = new WaveformVisualizer(document.getElementById('waveformCanvas'));
@@ -523,6 +526,10 @@ class VoiceDrawApp {
         this._execHelp();
         return;
 
+      case 'closeHelp':
+        this._execCloseHelp();
+        return;
+
       case 'compound':
         await this._execCompound(command);
         return;
@@ -778,17 +785,18 @@ class VoiceDrawApp {
   }
 
   _execHelp() {
-    const helpText = `声绘支持以下指令：
-      画一个圆形、画一个矩形、画一条直线、画一个三角形、画一个星形、画一个椭圆。
-      修改颜色，例如：改成红色。
-      调整大小，例如：放大、缩小。
-      移动位置，例如：往左移一点、移到右上角。
-      选中对象，例如：选中3号、选中左上角的圆。
-      清除画布、撤销、重做。
-      确认、取消、帮助。`;
-
-    voiceSynth.speak(helpText);
     this._showHelpPanel();
+  }
+
+  _execCloseHelp() {
+    const panel = document.getElementById('helpPanel');
+    if (panel?.classList.contains('visible')) {
+      panel.classList.remove('visible');
+      this.toast.info('已关闭帮助');
+    } else {
+      this.toast.info('帮助面板未打开');
+    }
+    return true;
   }
 
   async _execCompound(command) {
@@ -1250,7 +1258,7 @@ class VoiceDrawApp {
   _showHelpPanel() {
     const panel = document.getElementById('helpPanel');
     if (panel) {
-      panel.classList.toggle('visible');
+      panel.classList.add('visible');
     }
   }
 
@@ -1278,20 +1286,6 @@ class VoiceDrawApp {
   _initStatusUI() {
     // 初始状态
     this._onVoiceStatusChange('connecting');
-
-    // 帮助按钮
-    const helpBtn = document.getElementById('helpBtn');
-    if (helpBtn) {
-      helpBtn.addEventListener('click', () => this._execHelp());
-    }
-
-    // 关闭帮助面板
-    const closeHelp = document.getElementById('closeHelp');
-    if (closeHelp) {
-      closeHelp.addEventListener('click', () => {
-        document.getElementById('helpPanel')?.classList.remove('visible');
-      });
-    }
   }
 }
 
