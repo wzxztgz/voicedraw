@@ -1157,16 +1157,37 @@ class VoiceDrawApp {
   /**
    * 修改文字对象的内容
    * "把3号文字改成已完成"
+   *
+   * 支持两种目标：
+   *   1. 直接文字对象（type === 'text'，非系统）→ 直接更新 content
+   *   2. LLM 图节点（rect/diamond/…）→ 找到绑定的 _parentId 系统标签，更新其 content
+   *      同时更新节点自身的 _nodeText 以保持一致
    */
   _execModifyText(command) {
     const obj = store.getObjectByNumber(command.refId);
     if (!obj) { this.toast.warning(`未找到 ${command.refId} 号对象`); return null; }
-    if (obj.type !== 'text') {
-      this.toast.warning(`${command.refId} 号不是文字对象，无法修改内容`);
-      return null;
+
+    // 普通文字对象：直接修改
+    if (obj.type === 'text' && !obj._system) {
+      store.updateObject(obj.id, { content: command.content });
+      return obj;
     }
-    store.updateObject(obj.id, { content: command.content });
-    return obj;
+
+    // LLM 图节点：查找绑定的系统标签（_parentId === obj.id 且 type === 'text' 且 _system）
+    const nodeLabel = store.state.objects.find(
+      (o) => o._parentId === obj.id && o.type === 'text' && o._system,
+    );
+    if (nodeLabel) {
+      store.pushHistory();
+      store.updateObjectNoHistory(nodeLabel.id, { content: command.content });
+      store.updateObjectNoHistory(obj.id, { _nodeText: command.content });
+      // 手动触发视图更新
+      store.set('objects', [...store.state.objects]);
+      return obj;
+    }
+
+    this.toast.warning(`${command.refId} 号不是可编辑的文字对象`);
+    return null;
   }
 
   /**
