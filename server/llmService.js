@@ -180,6 +180,12 @@ color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，
 
 撤销/重做/清空：{"type":"undo"} | {"type":"redo"} | {"type":"clear"}
 
+连接两个图形（用线连接）：{"type":"connect","fromId":1,"toId":2}
+fromId/toId 从用户语音中提取编号，如"把1号连到2号"→fromId=1,toId=2
+
+添加文字标注：{"type":"addText","content":"文字内容","refId":1,"side":null}
+refId 为关联图形编号（可为 null）；side 为方位 right/left/above/below，写在图形内部时为 null
+
 无法识别：{"type":"unknown"}
 
 颜色：红=#FF6B6B 蓝=#45B7D1 绿=#96CEB4 黄=#FFEAA7 紫=#DDA0DD 橙=#FFA07A 黑=#333333 白=#FFFFFF 粉=#FFB6C1 青=#00CED1 灰=#999999`;

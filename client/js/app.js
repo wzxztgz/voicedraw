@@ -390,6 +390,17 @@ class VoiceDrawApp {
       case 'select':
         if (!target) return null;
         return { type: 'select', target };
+      case 'connect':
+        if (r.fromId == null || r.toId == null) return null;
+        return { type: 'connect', fromId: r.fromId, toId: r.toId };
+      case 'addText':
+        if (!r.content) return null;
+        return {
+          type: 'addText',
+          content: r.content,
+          refId: r.refId ?? null,
+          side: r.side ?? null,
+        };
       case 'undo':
       case 'redo':
       case 'clear':
@@ -483,6 +494,14 @@ class VoiceDrawApp {
       case 'compound':
         await this._execCompound(command);
         return;
+
+      case 'batch-draw':
+        result = this._execBatchDraw(command);
+        break;
+
+      case 'batch-color':
+        result = this._execBatchColor(command);
+        break;
 
       case 'refine':
         result = this._execRefine(command);
@@ -739,6 +758,12 @@ class VoiceDrawApp {
   async _execCompound(command) {
     this.isProcessing = true;
 
+    // 如果有跳过的子句，先给一次提示（不影响后续执行）
+    if (command.skipped && command.skipped.length > 0) {
+      const skippedHint = `跳过无法识别的步骤：${command.skipped.slice(0, 2).join('、')}`;
+      this.toast.warning(skippedHint, 3000);
+    }
+
     // 显示任务列表
     const tasks = command.tasks.map((t) => ({
       text: this._commandToDescription(t),
@@ -761,6 +786,56 @@ class VoiceDrawApp {
     this.toast.success('所有任务已完成');
 
     setTimeout(() => this.taskList.hide(), 2000);
+  }
+
+  /**
+   * 批量绘制图形（"画三个圆"）
+   * 自动横向均匀排布，避免图形重叠。
+   */
+  _execBatchDraw(command) {
+    const { canvasWidth: W, canvasHeight: H } = store.state;
+    const n = command.count;
+    const color = command.color || '#FF6B6B';
+
+    // 横向均匀排布：将画布宽度等分为 n+1 份，取中间 n 个间隔位置
+    const y = H / 2;
+    const step = W / (n + 1);
+
+    const added = [];
+    for (let i = 0; i < n; i++) {
+      const x = step * (i + 1);
+      const shape = createShape(command.shape, { x, y, color });
+      added.push(store.addObject(shape));
+    }
+
+    const lastName = added[added.length - 1];
+    return lastName; // 返回最后一个，供 feedback 使用
+  }
+
+  /**
+   * 批量改色（"把所有圆改成蓝色" / "全部改成红色"）
+   * filterShape 有值时只改该类型，否则改全部可交互对象。
+   */
+  _execBatchColor(command) {
+    const targets = store.state.objects.filter((o) => {
+      if (o._system) return false;                              // 跳过系统装饰元素
+      if (command.filterShape && o.type !== command.filterShape) return false;
+      return true;
+    });
+
+    if (targets.length === 0) {
+      const hint = command.filterShape ? `画布上没有${command.filterShape}` : '画布上没有可修改的对象';
+      this.toast.warning(hint);
+      return null;
+    }
+
+    // 用 pushHistory 一次，之后静默更新，保证整批是一个撤销步骤
+    store.pushHistory();
+    for (const obj of targets) {
+      store.updateObjectNoHistory(obj.id, { color: command.color });
+    }
+
+    return { count: targets.length, color: command.color };
   }
 
   _execRefine(command) {

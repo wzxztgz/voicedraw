@@ -115,6 +115,11 @@ export function parseCommand(text) {
   const modifyTextResult = parseModifyText(text);
   if (modifyTextResult) return modifyTextResult;
 
+  // 8.9 批量指令（"画三个圆" / "把所有圆改成蓝色"）
+  //     必须在单条 draw/color 之前，防止只解析出一个图形
+  const batchResult = parseBatch(text);
+  if (batchResult) return batchResult;
+
   // 9. 颜色修改指令
   const colorResult = parseColorChange(text);
   if (colorResult) return colorResult;
@@ -561,6 +566,12 @@ function parseRefine(text) {
   // 复制上一步操作类型
   const refined = { ...lastAction, type: 'refine', originalText: text };
 
+  // 如果文本中指定了新的目标 ID（如"再把1号移到右边"），覆盖 target
+  const explicitTarget = extractTarget(text);
+  if (explicitTarget) {
+    refined.target = explicitTarget;
+  }
+
   // 如果文本中包含新的参数，覆盖
   if (text.includes('大') || text.includes('放大')) {
     refined.factor = 1.1;
@@ -580,10 +591,94 @@ function parseRefine(text) {
 }
 
 /**
+ * 解析批量指令
+ * 支持两类：
+ *   1. 批量绘制：画三个圆 / 画两个矩形
+ *   2. 批量颜色：把所有圆改成蓝色 / 全部改成红色
+ */
+function parseBatch(text) {
+  // ── 批量绘制 ──────────────────────────────
+  // 数字词 → 数量
+  const countMap = {
+    '两': 2, '二': 2, '2': 2,
+    '三': 3, '3': 3,
+    '四': 4, '4': 4,
+    '五': 5, '5': 5,
+    '六': 6, '6': 6,
+  };
+
+  const drawVerbs = ['画', '绘制', '新建', '创建', '生成', '来', '整', '搞', '加'];
+  const hasDrawVerb = drawVerbs.some((v) => text.includes(v));
+
+  if (hasDrawVerb) {
+    for (const [word, count] of Object.entries(countMap)) {
+      if (!text.includes(word)) continue;
+
+      // 确保数字词后面紧跟"个/条"等量词（避免误匹配"二月"等）
+      const qtyRe = new RegExp(`${word}\\s*[个条枚张]?`);
+      if (!qtyRe.test(text)) continue;
+
+      // 找形状
+      const shapeKeywords = [
+        ['ellipse', ['椭圆形', '椭圆']],
+        ['triangle', ['三角形', '三角']],
+        ['rect', ['矩形', '长方形', '正方形', '方形', '方块']],
+        ['line', ['直线', '线段', '线条', '线']],
+        ['star', ['五角星', '星形', '星星']],
+        ['circle', ['圆形', '圆圈', '圆']],
+      ];
+      let shapeType = null;
+      for (const [type, kws] of shapeKeywords) {
+        if (kws.some((kw) => text.includes(kw))) { shapeType = type; break; }
+      }
+      if (!shapeType) continue;
+
+      let color = null;
+      for (const [name, hex] of Object.entries(COLOR_MAP)) {
+        if (text.includes(name)) { color = hex; break; }
+      }
+
+      return { type: 'batch-draw', shape: shapeType, color, count };
+    }
+  }
+
+  // ── 批量颜色 ──────────────────────────────
+  const batchColorWords = ['所有', '全部', '全都', '都', '每个', '每一个'];
+  const hasBatchWord = batchColorWords.some((w) => text.includes(w));
+  if (!hasBatchWord) return null;
+
+  // 必须包含颜色修改动词
+  const colorChangeVerbs = ['改成', '变成', '换成', '调成', '改为', '变为', '涂成', '刷成', '染成', '弄成', '整成'];
+  if (!colorChangeVerbs.some((v) => text.includes(v))) return null;
+
+  let color = null;
+  for (const [name, hex] of Object.entries(COLOR_MAP)) {
+    if (text.includes(name)) { color = hex; break; }
+  }
+  if (!color) return null;
+
+  // 可选：限定形状类型（"把所有圆改成蓝色" 中的"圆"）
+  const shapeKeywords = [
+    ['ellipse', ['椭圆形', '椭圆']],
+    ['triangle', ['三角形', '三角']],
+    ['rect', ['矩形', '方形', '方块']],
+    ['line', ['直线', '线']],
+    ['star', ['星形', '星星', '星']],
+    ['circle', ['圆形', '圆']],
+  ];
+  let filterShape = null;
+  for (const [type, kws] of shapeKeywords) {
+    if (kws.some((kw) => text.includes(kw))) { filterShape = type; break; }
+  }
+
+  return { type: 'batch-color', color, filterShape };
+}
+
+/**
  * 解析复合指令
  */
 function parseCompound(text) {
-  const separators = ['先', '然后', '接着', '再', '最后'];
+  const separators = ['先', '然后', '接着', '最后'];
   let hasSeparator = false;
   for (const sep of separators) {
     if (text.includes(sep)) {
@@ -592,20 +687,39 @@ function parseCompound(text) {
     }
   }
 
+  // "再" 只在不以它开头时作为 compound 分隔符，
+  // 避免与 parseRefine（step 7）冲突
+  if (!hasSeparator && !text.startsWith('再') && text.includes('再')) {
+    hasSeparator = true;
+  }
+
   if (!hasSeparator) return null;
 
-  // 简单按分隔符拆分
-  const parts = text.split(/先|然后|接着|再|最后/).filter((s) => s.trim().length > 0);
+  // 按分隔符拆分（"再"在开头时不作分隔符）
+  const parts = text.split(/先|然后|接着|最后|(?<!^)再/).filter((s) => s.trim().length > 0);
   if (parts.length < 2) return null;
 
   const subTasks = parts.map((part) => parseCommand(part.trim()));
-  if (subTasks.some((t) => !t || t.type === 'unknown')) {
-    return null; // 有无法解析的子任务
-  }
+
+  // 只保留能识别的子任务，跳过 unknown（不再因为一句话而放弃整条指令）
+  // _skipped 记录被跳过的原始文本，供执行层给出提示
+  const validTasks = [];
+  const skipped = [];
+  parts.forEach((part, i) => {
+    const cmd = subTasks[i];
+    if (cmd && cmd.type !== 'unknown') {
+      validTasks.push(cmd);
+    } else {
+      skipped.push(part.trim());
+    }
+  });
+
+  if (validTasks.length < 2) return null;
 
   return {
     type: 'compound',
-    tasks: subTasks,
+    tasks: validTasks,
+    skipped,
   };
 }
 

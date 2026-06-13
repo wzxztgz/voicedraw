@@ -90,6 +90,12 @@ class ContextManager {
       case 'delete': {
         return `已删除 ${result.id} 号`;
       }
+      case 'batch-draw': {
+        return `已绘制 ${command.count} 个图形`;
+      }
+      case 'batch-color': {
+        return `已修改 ${result.count} 个对象的颜色`;
+      }
       case 'connect': {
         return `已连接 ${command.fromId} 号和 ${command.toId} 号`;
       }
