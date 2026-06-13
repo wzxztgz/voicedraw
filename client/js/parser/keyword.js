@@ -44,6 +44,45 @@ function correctHomophones(text) {
  * @param {string} text - 语音识别文本
  * @returns {object|null} 解析后的指令
  */
+/**
+ * 复杂信号检测
+ * 判断一句话在结构上是否属于「多动作复合指令」。
+ * 返回 true 时上层会主动路由到 LLM，而不是等规则引擎误判成单条指令。
+ *
+ * 触发条件（满足任意一条）：
+ *   1. 含复合分隔词（先/然后/接着/最后/并且/还要/之后）
+ *   2. 句中出现 ≥2 个绘制动词（如"画…画…"）
+ *   3. 句中出现 ≥2 种不同形状词（如同时含"圆"和"矩形"）
+ *   4. 长句（>20字）且含至少一个绘制动词（口语化多步指令）
+ *
+ * 不触发：「再画一个圆」（以"再"开头的微调/续画），交给 parseRefine/parseDraw 处理。
+ */
+export function hasComplexSignal(text) {
+  // 条件1：分隔词
+  const separators = ['先', '然后', '接着', '最后', '并且', '还要', '之后', '随后', '紧接着', '接下来'];
+  // "再"只在非句首时才算分隔词，以免误判"再大一点"
+  if (separators.some((s) => text.includes(s))) return true;
+  if (!text.startsWith('再') && text.includes('再')) return true;
+
+  // 条件2：≥2 个绘制动词
+  const drawVerbs = ['画', '绘制', '创建', '新建', '添加', '生成'];
+  const drawVerbCount = drawVerbs.reduce((n, v) => n + (text.split(v).length - 1), 0);
+  if (drawVerbCount >= 2) return true;
+
+  // 条件3：≥2 种不同形状词
+  const shapeWords = ['圆', '矩形', '方形', '方块', '直线', '线段', '三角', '星形', '星星', '椭圆'];
+  const matchedShapes = shapeWords.filter((s) => text.includes(s));
+  const uniqueShapes = new Set(matchedShapes.map((s) => {
+    if (s === '方形' || s === '方块') return 'rect';
+    if (s === '星形' || s === '星星') return 'star';
+    if (s === '线段') return 'line';
+    return s;
+  }));
+  if (uniqueShapes.size >= 2) return true;
+
+  return false;
+}
+
 export function parseCommand(text) {
   const original = text;
   text = correctHomophones(text.trim().toLowerCase());
@@ -85,6 +124,15 @@ export function parseCommand(text) {
     return { type: 'redo' };
   }
 
+  // 6.5 复合指令（先...然后.../再...）
+  // ★ 必须在 parseDraw 等单条解析之前，防止整句被单条规则"误判成功"。
+  //   parseCompound 内部递归调 parseCommand 解析子句，不会二次进入此分支。
+  //   "再..." 以句首开头时先让步骤 7 的 parseRefine 处理（微调/续画语义）。
+  if (!text.startsWith('再') && !text.startsWith('继续')) {
+    const compoundResult = parseCompound(text);
+    if (compoundResult) return compoundResult;
+  }
+
   // 7. "再..." 微调指令
   // 注意：若同时含有绘制动词+形状（如"再画一个圆"），优先走 parseDraw，
   // 否则 parseRefine 会静默失败（_execRefine 不处理 draw 类型）
@@ -120,6 +168,11 @@ export function parseCommand(text) {
   const batchResult = parseBatch(text);
   if (batchResult) return batchResult;
 
+  // 8.95 形状变更指令（"改成矩形" / "换成圆形" / "变成三角形"）
+  //      必须在颜色修改前，防止"改成红色"被误拦（颜色修改要求颜色词，互不冲突）
+  const shapeChangeResult = parseShapeChange(text);
+  if (shapeChangeResult) return shapeChangeResult;
+
   // 9. 颜色修改指令
   const colorResult = parseColorChange(text);
   if (colorResult) return colorResult;
@@ -135,10 +188,6 @@ export function parseCommand(text) {
   // 12. 位置移动指令
   const moveResult = parseMove(text);
   if (moveResult) return moveResult;
-
-  // 13. 复合指令（包含 "先...然后..." 或 "再..."）
-  const compoundResult = parseCompound(text);
-  if (compoundResult) return compoundResult;
 
   // 未识别
   return { type: 'unknown', text };
@@ -189,10 +238,11 @@ function parseDraw(text) {
     }
   }
 
-  // 提取大小
+  // 提取大小 —— 先去掉"大小""不大不小""合适大小"等中性词，防止误判
   let sizeModifier = null;
-  if (text.includes('大')) sizeModifier = 'large';
-  else if (text.includes('小')) sizeModifier = 'small';
+  const sizeText = text.replace(/大小|不大不小|合适大小|适中大小|适当大小/g, '');
+  if (sizeText.includes('大') || sizeText.includes('巨')) sizeModifier = 'large';
+  else if (sizeText.includes('小')) sizeModifier = 'small';
 
   // 检测相对位置（"在1号右边画圆" / "在3号上方画矩形"）
   // 优先级高于绝对位置
@@ -272,11 +322,13 @@ function parseSelect(text) {
     // 含有操作动词（移/改/放大等）但无选中词 → 这是针对目标的操作指令，不是选中指令
     // 交给 parseMove / parseColorChange / parseSizeChange 处理（它们会通过 extractTarget 获取目标）
     const hasActionVerb = [
-      '移', '放大', '缩小', '变大', '变小', '改成', '变成', '换成', '调成',
+      '移', '放大', '缩小', '变大', '变小',
+      '改成', '变成', '换成', '改为', '变为', '换为', '调成', '修改', '调整',
       '删除', '删掉', '移除', '去掉', '擦掉', '擦除',
       '连接', '连线', '连到', '相连',          // 连线指令
       '画', '绘制', '新建', '创建',             // 绘制（"在1号右边画圆"）
       '加文字', '添加文字', '写上', '标注',     // 文字标注
+      '将', '把',                               // "将1号改为红色" / "把3号变成蓝色"
     ].some((v) => text.includes(v));
     if (hasActionVerb && !hasSelectVerb) {
       // 不拦截，让操作解析器处理
@@ -305,7 +357,9 @@ function parseSelect(text) {
     }
 
     if (shapeType) {
-      return { type: 'select', target: { type: 'shape', shapeType } };
+      // 同时携带位置信息（"选中左上角的圆"），供执行层按距离就近选
+      const position = parsePosition(text);
+      return { type: 'select', target: { type: 'shape', shapeType, position } };
     }
   }
 
@@ -465,8 +519,16 @@ function parseColorChange(text) {
     '改色', '变色', '换色', '修改颜色', '调整颜色',
     // 口语化扩充
     '涂成', '刷成', '染成', '填成', '给它变', '弄成', '整成',
+    // "将1号改为红色" / "把颜色改为蓝色"
+    '将', '把',
   ];
-  if (!colorChangeVerbs.some((v) => text.includes(v))) return null;
+  // 含"将/把"时须同时含变更动词，避免"把圆画大"误触发
+  const hasChangeVerb = ['改成', '变成', '换成', '改为', '变为', '换为', '调成',
+    '涂成', '刷成', '染成', '弄成', '整成', '改色', '变色', '换色'].some((v) => text.includes(v));
+  const hasSetPrefix = text.includes('将') || text.includes('把');
+  const matchedVerb = colorChangeVerbs.some((v) => text.includes(v));
+  if (!matchedVerb) return null;
+  if (hasSetPrefix && !hasChangeVerb) return null;
 
   let color = null;
   let colorName = null;
@@ -721,6 +783,44 @@ function parseCompound(text) {
     tasks: validTasks,
     skipped,
   };
+}
+
+/**
+ * 解析形状变更指令
+ * "改成矩形" / "把圆换成三角形" / "变成椭圆"
+ * 要求：含变更动词 + 形状关键词；不含绘制动词（避免与 parseDraw 冲突）
+ */
+function parseShapeChange(text) {
+  const changeVerbs = ['改成', '变成', '换成', '改为', '变为', '换为', '换个形', '改个形'];
+  if (!changeVerbs.some((v) => text.includes(v))) return null;
+
+  // 必须含形状关键词（长词优先避免"圆"匹配"椭圆"内部）
+  const shapeKeywords = [
+    ['ellipse',  ['椭圆形', '椭圆']],
+    ['triangle', ['三角形', '三角']],
+    ['rect',     ['矩形', '长方形', '正方形', '方形', '方块']],
+    ['line',     ['直线', '线段', '线条']],
+    ['star',     ['五角星', '星形', '星星']],
+    ['circle',   ['圆形', '圆圈', '圆']],
+  ];
+
+  let shape = null;
+  for (const [type, keywords] of shapeKeywords) {
+    if (keywords.some((kw) => text.includes(kw))) { shape = type; break; }
+  }
+  if (!shape) return null;
+
+  // 含绘制动词 → 这是绘制指令，让 parseDraw 处理
+  const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成'];
+  if (drawVerbs.some((v) => text.includes(v))) return null;
+
+  // 可选：同时指定新颜色（"改成红色矩形"）
+  let color = null;
+  for (const [name, hex] of Object.entries(COLOR_MAP)) {
+    if (text.includes(name)) { color = hex; break; }
+  }
+
+  return { type: 'shapeChange', shape, color, target: extractTarget(text) };
 }
 
 /**

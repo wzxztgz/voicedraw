@@ -57,49 +57,55 @@ export function drawShape(ctx, shape, isPreview = false) {
     }
   }
 
-  ctx.strokeStyle = shape.color || '#333';
-  ctx.fillStyle = shape.color || '#333';
+  // 白色在浅色画布背景（#F8F9FB）上不可见，归一化为可见的浅灰
+  const rawColor = shape.color || '#333333';
+  const isWhite = rawColor.toUpperCase() === '#FFFFFF';
+  const strokeColor = isWhite ? '#AAAAAA' : rawColor;
+  const s = isWhite ? { ...shape, color: '#DDDDDD' } : shape;
+
+  ctx.strokeStyle = strokeColor;
+  ctx.fillStyle = strokeColor;
   ctx.lineWidth = shape.lineWidth || 2;
 
-  switch (shape.type) {
+  switch (s.type) {
     case 'circle':
-      drawCircle(ctx, shape);
+      drawCircle(ctx, s);
       break;
     case 'rect':
-      drawRect(ctx, shape);
+      drawRect(ctx, s);
       break;
     case 'line':
-      drawLine(ctx, shape);
+      drawLine(ctx, s);
       break;
     case 'triangle':
-      drawTriangle(ctx, shape);
+      drawTriangle(ctx, s);
       break;
     case 'star':
-      drawStar(ctx, shape);
+      drawStar(ctx, s);
       break;
     case 'ellipse':
-      drawEllipse(ctx, shape);
+      drawEllipse(ctx, s);
       break;
     case 'text':
-      drawText(ctx, shape);
+      drawText(ctx, s);
       break;
     case 'arc':
-      drawArc(ctx, shape);
+      drawArc(ctx, s);
       break;
     case 'diamond':
-      drawDiamond(ctx, shape);
+      drawDiamond(ctx, s);
       break;
     case 'curve':
-      drawCurve(ctx, shape);
+      drawCurve(ctx, s);
       break;
     case 'rounded-rect':
-      drawRoundedRect(ctx, shape);
+      drawRoundedRect(ctx, s);
       break;
     case 'ortho':
-      drawOrtho(ctx, shape);
+      drawOrtho(ctx, s);
       break;
     default:
-      drawCircle(ctx, shape);
+      drawCircle(ctx, s);
   }
 
   ctx.restore();
@@ -327,7 +333,7 @@ export function drawLabel(ctx, shape) {
   if (shape._system) return;
 
   ctx.save();
-  const labelX = shape.x || (shape.x + shape.x2) / 2;
+  const labelX = shape.type === 'line' ? (shape.x + shape.x2) / 2 : shape.x;
   const labelY = getShapeBounds(shape).y - 12;
 
   ctx.font = 'bold 14px "Noto Sans SC", sans-serif';

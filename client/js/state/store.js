@@ -176,11 +176,16 @@ class Store {
   }
 
   /**
-   * 删除图形对象
+   * 删除图形对象，同时级联删除以该对象为端点的连线（_fromId / _toId）
+   * 整批在同一个历史快照内，撤销时一次性还原。
    */
   removeObject(id) {
     this.pushHistory();
     this._state.objects = this._state.objects.filter((o) => o.id !== id);
+    // 移除以已删除对象为任意端点的孤立连线
+    this._state.objects = this._state.objects.filter(
+      (o) => !(o._fromId === id || o._toId === id)
+    );
     this.set('objects', [...this._state.objects]);
     if (this._state.selectedId === id) {
       this.set('selectedId', null);

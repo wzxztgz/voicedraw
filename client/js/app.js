@@ -6,7 +6,7 @@
 import store from './state/store.js';
 import Renderer from './canvas/renderer.js';
 import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName, getShapeBounds, getShapeEdgePoint } from './canvas/shapes.js';
-import { parseCommand, detectKeywords } from './parser/keyword.js';
+import { parseCommand, detectKeywords, hasComplexSignal } from './parser/keyword.js';
 import { positionToCoords } from './canvas/grid.js';
 import contextManager from './parser/context.js';
 import voiceRecorder from './voice/recorder.js';
@@ -34,6 +34,7 @@ class VoiceDrawApp {
     this._llmSessionActive = false;   // 是否在描述模式
     this._llmSessionBuffer = [];      // 已收集的句子片段
     this._llmSessionId = null;        // 本轮会话 ID（传给后端保持历史）
+    this._llmParseActive = false;     // 防止并发兜底解析请求导致回调覆盖
   }
 
   /**
@@ -299,15 +300,29 @@ class VoiceDrawApp {
 
   /**
    * 处理最终指令
-   * 流程：规则匹配 → 成功则直接执行；返回 unknown 时触发 LLM 兜底解析。
+   * 三层路由策略：
+   *   Layer 1 (规则快路径)：单动作高频指令，<50ms 响应
+   *   Layer 2 (LLM 结构解析)：检测到复杂信号时主动路由，不等规则误判
+   *   Layer 3 (LLM 图形生成)：parseLLMIntent 触发，已在 parseCommand 内处理
    */
   _processCommand(text) {
     if (this.previewTimeout) clearTimeout(this.previewTimeout);
 
+    // Layer 2：主动复杂信号检测
+    // 当句子结构上就属于多动作复合指令时，直接交给 LLM 解析，
+    // 而不是等规则"误判成功"返回一个错误的单条指令。
+    if (hasComplexSignal(text)) {
+      console.log('[VoiceDraw] Complex signal detected, routing to LLM:', text);
+      store.cancelPreview();
+      this._llmFallbackParse(text);
+      return;
+    }
+
+    // Layer 1：规则快路径
     const command = parseCommand(text);
 
     if (!command || command.type === 'unknown') {
-      // 规则匹配失败 → LLM 兜底（异步，有 ~1-2s 延迟但能覆盖边界情况）
+      // 规则无法识别 → LLM 兜底
       store.cancelPreview();
       this._llmFallbackParse(text);
       return;
@@ -324,9 +339,14 @@ class VoiceDrawApp {
    * - LLM 失败/返回 unknown：降级为普通"没有理解"提示
    */
   _llmFallbackParse(text) {
+    // 若已有一个兜底解析请求在飞，直接丢弃新请求，防止回调覆盖导致指令串台
+    if (this._llmParseActive) return;
+    this._llmParseActive = true;
+
     this.toast.show('🤔 正在理解指令...', 'info', 8000);
 
     voiceRecorder.onLLMParseResult = (data) => {
+      this._llmParseActive = false;
       voiceRecorder.onLLMParseResult = null;
       voiceRecorder.onLLMParseError = null;
 
@@ -342,6 +362,7 @@ class VoiceDrawApp {
     };
 
     voiceRecorder.onLLMParseError = (err) => {
+      this._llmParseActive = false;
       voiceRecorder.onLLMParseResult = null;
       voiceRecorder.onLLMParseError = null;
       console.warn('[VoiceDraw] LLM fallback error:', err);
@@ -401,6 +422,16 @@ class VoiceDrawApp {
           refId: r.refId ?? null,
           side: r.side ?? null,
         };
+      case 'shapeChange':
+        if (!r.shape) return null;
+        return { type: 'shapeChange', shape: r.shape, color: r.color || null, target };
+      case 'compound': {
+        // LLM 返回复合指令：将 tasks 数组里的每个子项递归转换
+        if (!Array.isArray(r.tasks) || r.tasks.length < 2) return null;
+        const tasks = r.tasks.map((t) => this._llmResultToCommand(t)).filter(Boolean);
+        if (tasks.length < 2) return null;
+        return { type: 'compound', tasks, skipped: [] };
+      }
       case 'undo':
       case 'redo':
       case 'clear':
@@ -412,9 +443,10 @@ class VoiceDrawApp {
 
   /**
    * 执行指令（核心方法）
+   * @param {boolean} _isSubTask - true 时跳过 isProcessing 守卫（供复合指令内部调用）
    */
-  async _executeCommand(command, originalText) {
-    if (this.isProcessing && command.type !== 'cancel') return;
+  async _executeCommand(command, originalText, _isSubTask = false) {
+    if (!_isSubTask && this.isProcessing && command.type !== 'cancel') return;
 
     let result = null;
     let feedback = '';
@@ -542,7 +574,9 @@ class VoiceDrawApp {
       }
     }
 
-    // 清除预览
+    // 每次操作完成后清除预览和关键词提示
+    if (this.previewTimeout) clearTimeout(this.previewTimeout);
+    store.cancelPreview();
     store.set('detectedKeywords', { color: null, shape: null, size: null, position: null });
   }
 
@@ -618,8 +652,15 @@ class VoiceDrawApp {
     if (command.target.type === 'id') {
       obj = store.getObjectByNumber(command.target.value);
     } else if (command.target.type === 'shape') {
-      // 按形状类型查找，选第一个匹配的
-      const candidates = store.state.objects.filter((o) => o.type === command.target.shapeType);
+      let candidates = store.state.objects.filter((o) => o.type === command.target.shapeType);
+      // 若解析出了位置信息（"选中左上角的圆"），按与目标位置的距离就近选
+      if (command.target.position && candidates.length > 1) {
+        const { canvasWidth: W, canvasHeight: H } = store.state;
+        const tc = positionToCoords(command.target.position, W, H);
+        candidates = candidates.slice().sort((a, b) =>
+          Math.hypot(a.x - tc.x, a.y - tc.y) - Math.hypot(b.x - tc.x, b.y - tc.y)
+        );
+      }
       obj = candidates.length > 0 ? candidates[0] : null;
     }
 
@@ -679,20 +720,15 @@ class VoiceDrawApp {
   }
 
   _execShapeChange(command) {
-    const obj = store.getSelected();
-    if (!obj) {
-      voiceSynth.speak('请先选中一个对象');
-      this.toast.warning('请先选中一个对象');
-      return null;
-    }
+    const obj = this._resolveTarget(command);
+    if (!obj) return null;
 
-    // 形状变更：重建对象，保留位置和颜色
+    // 形状变更：重建对象，保留位置；颜色优先用指令指定，否则沿用旧色
     const newObj = createShape(command.shape, {
       x: obj.x,
       y: obj.y,
-      color: obj.color,
+      color: command.color || obj.color,
     });
-    // 保留 id 和选中状态
     newObj.id = obj.id;
     store.replaceObject(obj.id, newObj);
     return newObj;
@@ -771,10 +807,10 @@ class VoiceDrawApp {
     }));
     this.taskList.show(tasks);
 
-    // 逐个执行
+    // 逐个执行（传 _isSubTask=true 绕过 isProcessing 守卫）
     for (let i = 0; i < command.tasks.length; i++) {
       const subCommand = command.tasks[i];
-      await this._executeCommand(subCommand);
+      await this._executeCommand(subCommand, '', true);
       this.taskList.completeCurrent();
 
       // 短暂延迟，让用户看到进度

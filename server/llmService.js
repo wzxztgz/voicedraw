@@ -160,7 +160,11 @@ const PARSE_SYSTEM_PROMPT = `你是一个语音绘图指令解析器。将中文
 只返回合法JSON，不含任何解释、代码块标记或多余文字。
 画布：800×600，坐标原点左上角。
 
-命令格式（选择最匹配的一种）：
+【判断规则】
+- 若句子包含「先/然后/接着/最后/并且/还要/之后」等分隔词，或者含有两个及以上绘制动作，则输出 compound 类型。
+- 否则选择下列单条命令中最匹配的一种。
+
+【单条命令格式】
 
 绘制图形（shape: circle/rect/line/triangle/star/ellipse）：
 {"type":"draw","shape":"circle","color":"#FF6B6B","position":{"dx":0,"dy":0}}
@@ -181,10 +185,19 @@ color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，
 撤销/重做/清空：{"type":"undo"} | {"type":"redo"} | {"type":"clear"}
 
 连接两个图形（用线连接）：{"type":"connect","fromId":1,"toId":2}
-fromId/toId 从用户语音中提取编号，如"把1号连到2号"→fromId=1,toId=2
+
+改变形状（保留位置和颜色，仅换形状）：{"type":"shapeChange","shape":"circle","color":null,"targetId":null}
 
 添加文字标注：{"type":"addText","content":"文字内容","refId":1,"side":null}
-refId 为关联图形编号（可为 null）；side 为方位 right/left/above/below，写在图形内部时为 null
+side 为方位 right/left/above/below，写在图形内部时为 null
+
+【复合指令格式】（含多个步骤时使用）：
+{"type":"compound","tasks":[
+  {"type":"draw","shape":"circle","color":"#FF6B6B"},
+  {"type":"draw","shape":"rect","color":"#45B7D1"},
+  {"type":"color","color":"#96CEB4","targetId":null}
+]}
+tasks 中每个元素的格式与单条命令相同；按句子顺序排列；无法识别的步骤直接跳过不要放入 tasks。
 
 无法识别：{"type":"unknown"}
 
@@ -202,7 +215,7 @@ LLMService.prototype.parseBasicCommand = async function (userText) {
     parameters: {
       result_format: 'message',
       temperature: 0.0,   // 解析任务要求确定性输出，温度设为 0
-      max_tokens: 200,    // 命令 JSON 很短，限制 token 加速响应
+      max_tokens: 600,    // compound 任务数组较长，提升上限
     },
   });
 
