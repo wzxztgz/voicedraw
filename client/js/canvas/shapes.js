@@ -14,6 +14,7 @@ export function createShape(type, options = {}) {
     circle:   { type: 'circle',   x: 400, y: 300, radius: 50, color: '#FF6B6B', lineWidth: 2 },
     rect:     { type: 'rect',     x: 350, y: 250, width: 100, height: 80, color: '#4ECDC4', lineWidth: 2 },
     line:     { type: 'line',     x: 300, y: 300, x2: 500, y2: 300, color: '#45B7D1', lineWidth: 3 },
+    'arrow-line': { type: 'arrow-line', x: 300, y: 300, x2: 500, y2: 300, color: '#45B7D1', lineWidth: 3 },
     triangle: { type: 'triangle', x: 400, y: 250, size: 60, color: '#96CEB4', lineWidth: 2 },
     star:     { type: 'star',     x: 400, y: 300, size: 40, color: '#FFEAA7', lineWidth: 2 },
     ellipse:  { type: 'ellipse',  x: 400, y: 300, rx: 80, ry: 50, color: '#DDA0DD', lineWidth: 2 },
@@ -77,6 +78,9 @@ export function drawShape(ctx, shape, isPreview = false) {
     case 'line':
       drawLine(ctx, s);
       break;
+    case 'arrow-line':
+      drawArrowLine(ctx, s);
+      break;
     case 'triangle':
       drawTriangle(ctx, s);
       break;
@@ -135,6 +139,28 @@ function drawLine(ctx, shape) {
   ctx.moveTo(x, y);
   ctx.lineTo(x2, y2);
   ctx.stroke();
+}
+
+/** 带箭头的直线（终点为箭头） */
+function drawArrowLine(ctx, shape) {
+  const { x, y, x2, y2, color, lineWidth } = shape;
+  const lw = lineWidth || 3;
+  ctx.lineWidth = lw;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+
+  const angle = Math.atan2(y2 - y, x2 - x);
+  const headLen = 12;
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
+  ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
+  ctx.closePath();
+  ctx.fillStyle = color || ctx.strokeStyle;
+  ctx.fill();
 }
 
 function drawTriangle(ctx, shape) {
@@ -346,7 +372,8 @@ export function drawLabel(ctx, shape) {
   if (shape._system) return;
 
   ctx.save();
-  const labelX = shape.type === 'line' ? (shape.x + shape.x2) / 2 : shape.x;
+  const labelX = (shape.type === 'line' || shape.type === 'arrow-line')
+    ? (shape.x + shape.x2) / 2 : shape.x;
   const labelY = getShapeBounds(shape).y - 12;
 
   ctx.font = 'bold 14px "Noto Sans SC", sans-serif';
@@ -378,6 +405,7 @@ export function getShapeBounds(shape) {
     case 'rect':
       return { x: shape.x - shape.width / 2, y: shape.y - shape.height / 2, w: shape.width, h: shape.height };
     case 'line':
+    case 'arrow-line':
       return {
         x: Math.min(shape.x, shape.x2),
         y: Math.min(shape.y, shape.y2) - 5,
@@ -466,6 +494,7 @@ export const SHAPE_NAMES = {
   circle: '圆形',
   rect: '矩形',
   line: '直线',
+  'arrow-line': '箭头线',
   triangle: '三角形',
   star: '星形',
   ellipse: '椭圆',

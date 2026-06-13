@@ -170,8 +170,87 @@ class VoiceDrawApp {
       '圆形': 'circle', '方形': 'rect', '矩形': 'rect', '方块': 'rect',
       '直线': 'line', '三角形': 'triangle',
       '星形': 'star', '椭圆': 'ellipse', '椭圆形': 'ellipse',
+      '菱形': 'diamond', '圆角矩形': 'rounded-rect',
+      '箭头线': 'arrow-line', '箭头': 'arrow-line',
     };
     return map[shapeName] || 'circle';
+  }
+
+  /**
+   * 解析箭头线起止点（编号 / 方位 / 朝向 / 默认水平）
+   */
+  _buildArrowLineEndpoints(command, W, H) {
+    const len = 200;
+
+    if (command.fromId != null && command.toId != null) {
+      const obj1 = store.getObjectByNumber(command.fromId);
+      const obj2 = store.getObjectByNumber(command.toId);
+      if (!obj1) { this.toast.warning(`未找到 ${command.fromId} 号对象`); return null; }
+      if (!obj2) { this.toast.warning(`未找到 ${command.toId} 号对象`); return null; }
+      const p1 = getShapeEdgePoint(obj1, obj2.x, obj2.y);
+      const p2 = getShapeEdgePoint(obj2, obj1.x, obj1.y);
+      return { x: p1.x, y: p1.y, x2: p2.x, y2: p2.y, _fromId: obj1.id, _toId: obj2.id };
+    }
+
+    const resolvePoint = (id, pos, fallbackX, fallbackY) => {
+      if (id != null) {
+        const obj = store.getObjectByNumber(id);
+        if (!obj) { this.toast.warning(`未找到 ${id} 号对象`); return null; }
+        return { x: obj.x, y: obj.y, obj };
+      }
+      if (pos) {
+        const c = positionToCoords(pos, W, H);
+        return { x: c.x, y: c.y, obj: null };
+      }
+      if (fallbackX != null && fallbackY != null) {
+        return { x: fallbackX, y: fallbackY, obj: null };
+      }
+      return null;
+    };
+
+    const from = resolvePoint(command.fromId, command.fromPosition, W * 0.35, H / 2);
+    if (!from) return null;
+    const to = resolvePoint(command.toId, command.toPosition, null, null);
+
+    if (to) {
+      let x1 = from.x;
+      let y1 = from.y;
+      let x2 = to.x;
+      let y2 = to.y;
+      if (from.obj) {
+        const p1 = getShapeEdgePoint(from.obj, x2, y2);
+        x1 = p1.x; y1 = p1.y;
+      }
+      if (to.obj) {
+        const p2 = getShapeEdgePoint(to.obj, x1, y1);
+        x2 = p2.x; y2 = p2.y;
+      }
+      const opts = { x: x1, y: y1, x2, y2 };
+      if (from.obj) opts._fromId = from.obj.id;
+      if (to.obj) opts._toId = to.obj.id;
+      return opts;
+    }
+
+    const dir = command.direction || { dx: 1, dy: 0 };
+    let x1 = from.x;
+    let y1 = from.y;
+    let x2 = from.x + dir.dx * len;
+    let y2 = from.y + dir.dy * len;
+
+    if (command.position && command.fromId == null && command.fromPosition == null) {
+      const c = positionToCoords(command.position, W, H);
+      x1 = c.x; y1 = c.y;
+      x2 = c.x + dir.dx * len;
+      y2 = c.y + dir.dy * len;
+    }
+
+    if (from.obj) {
+      const p1 = getShapeEdgePoint(from.obj, x2, y2);
+      x1 = p1.x; y1 = p1.y;
+      return { x: x1, y: y1, x2, y2, _fromId: from.obj.id };
+    }
+
+    return { x: x1, y: y1, x2, y2 };
   }
 
   /**
@@ -208,7 +287,8 @@ class VoiceDrawApp {
 
     const preview = createShape(shapeType, {
       x, y,
-      color: keywords.color || '#FF4444', // 阶段1用红色定位圆
+      ...(shapeType === 'arrow-line' ? { x2: x + 200, y2: y } : {}),
+      color: keywords.color || '#FF4444',
       ...sizeModifier,
     });
     preview._stage = stage;
@@ -238,6 +318,7 @@ class VoiceDrawApp {
         }
         const newPreview = createShape(newShapeType, {
           x, y,
+          ...(newShapeType === 'arrow-line' ? { x2: x + 200, y2: y } : {}),
           color: keywords.color || preview.color,
           ...sizeModifier,
         });
@@ -592,13 +673,26 @@ class VoiceDrawApp {
   _execDraw(command) {
     const { canvasWidth: W, canvasHeight: H } = store.state;
 
-    // 计算最终尺寸（命令优先，其次沿用预览的 _sizeTag）
     const sizeTag = command.sizeModifier || (store.state.preview && store.state.preview._sizeTag);
     const sizeOverrides = {};
     if (sizeTag === 'large') {
       Object.assign(sizeOverrides, { radius: 80, width: 160, height: 120, size: 90, rx: 120, ry: 75 });
     } else if (sizeTag === 'small') {
       Object.assign(sizeOverrides, { radius: 30, width: 60, height: 50, size: 35, rx: 50, ry: 30 });
+    }
+
+    // 箭头线：单独解析起止点
+    if (command.shape === 'arrow-line') {
+      const endpoints = this._buildArrowLineEndpoints(command, W, H);
+      if (!endpoints) return null;
+
+      const shape = createShape('arrow-line', {
+        color: command.color || '#45B7D1',
+        lineWidth: 3,
+        ...endpoints,
+      });
+      if (store.state.preview) store.cancelPreview();
+      return store.addObject(shape);
     }
 
     if (store.state.preview) {

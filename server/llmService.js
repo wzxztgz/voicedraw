@@ -166,8 +166,9 @@ const PARSE_SYSTEM_PROMPT = `你是一个语音绘图指令解析器。将中文
 
 【单条命令格式】
 
-绘制图形（shape: circle/rect/line/triangle/star/ellipse）：
+绘制图形（shape: circle/rect/line/triangle/star/ellipse/diamond/rounded-rect/arrow-line）：
 {"type":"draw","shape":"circle","color":"#FF6B6B","position":{"dx":0,"dy":0}}
+shape 取值：circle=圆形 rect=矩形 rounded-rect=圆角矩形 diamond=菱形 arrow-line=箭头线
 color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，左=-1右=1上=-1下=1
 
 修改颜色：{"type":"color","color":"#FF6B6B","targetId":3}  （targetId 无指定则 null）
@@ -187,6 +188,7 @@ color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，
 连接两个图形（用线连接）：{"type":"connect","fromId":1,"toId":2}
 
 改变形状（保留位置和颜色，仅换形状）：{"type":"shapeChange","shape":"circle","color":null,"targetId":null}
+shape 支持：circle/rect/rounded-rect/diamond/line/triangle/star/ellipse/arrow-line
 
 添加文字标注：{"type":"addText","content":"文字内容","refId":1,"side":null}
 side 为方位 right/left/above/below，写在图形内部时为 null

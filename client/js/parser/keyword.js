@@ -5,7 +5,140 @@
 
 import store from '../state/store.js';
 import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName } from '../canvas/shapes.js';
-import { parseMovement, parsePosition } from '../canvas/grid.js';
+import { parseMovement, parsePosition, DIRECTION_MAP } from '../canvas/grid.js';
+
+// ─── 形状关键词（长词优先，全局共用）────────────────────────
+const SHAPE_KEYWORDS = [
+  ['rounded-rect', ['圆角矩形', '圆角方块', '跑道形', '胶囊形']],
+  ['diamond',      ['菱形', '钻石形']],
+  ['ellipse',      ['椭圆形', '椭圆']],
+  ['triangle',     ['三角形', '三角']],
+  ['star',         ['五角星', '星形', '星星']],
+  ['circle',       ['圆形', '圆圈', '圆']],
+  ['rect',         ['矩形', '长方形', '正方形', '方形', '方块']],
+  ['line',         ['直线', '线段', '线条', '线']],
+];
+
+/** 从文本解析基础形状类型（不含箭头线） */
+function resolveShapeType(text) {
+  for (const [type, keywords] of SHAPE_KEYWORDS) {
+    if (keywords.some((kw) => text.includes(kw))) return type;
+  }
+  return null;
+}
+
+const DRAW_VERBS = [
+  '画', '绘制', '绘画', '新建', '创建', '添加', '生成',
+  '来个', '来一个', '整个', '整一个', '加个', '加一个',
+  '做个', '做一个', '弄个', '弄一个',
+  '搞个', '搞一个', '要个', '要一个', '给我画', '给我一个',
+  '帮我画', '帮我整', '帮我做', '搞出', '整出', '弄出',
+  '来一', '整一', '画出', '弄一', '搞一',
+  '一条线', '一根线', '画一条', '画一根',
+];
+
+function hasDrawVerb(text) {
+  return DRAW_VERBS.some((v) => text.includes(v));
+}
+
+/** 预渲染用：长词优先，含箭头线 */
+function detectShapeLabel(text) {
+  const arrowDetect = [
+    ['带箭头的线', '箭头线'], ['有箭头的线', '箭头线'], ['箭头直线', '箭头线'],
+    ['箭头线', '箭头线'], ['箭头', '箭头线'],
+  ];
+  for (const [key, label] of arrowDetect) {
+    if (text.includes(key)) return label;
+  }
+  const labelMap = {
+    'rounded-rect': '圆角矩形', diamond: '菱形', ellipse: '椭圆',
+    triangle: '三角形', star: '星形', circle: '圆形', rect: '矩形', line: '直线',
+  };
+  for (const [type, keywords] of SHAPE_KEYWORDS) {
+    if (keywords.some((kw) => text.includes(kw))) return labelMap[type];
+  }
+  return null;
+}
+
+/** 解析「从 A 指向 B」端点（编号或九宫格方位） */
+function parseDirectedEndpoints(text) {
+  const m = text.match(/从\s*(.+?)\s*(?:指向|指到)\s*(.+)/);
+  const m2 = !m && /画|绘制|一条线|一根线|箭头/.test(text)
+    ? text.match(/从\s*(.+?)\s*到\s*(.+)/)
+    : null;
+  const seg = m || m2;
+  if (!seg) return null;
+
+  const fromStr = seg[1].trim();
+  let toStr = seg[2].trim().replace(/(?:的)?(?:箭头线|箭头直线|箭头|线)\s*$/, '');
+
+  let fromId = null;
+  let toId = null;
+  let fromPosition = null;
+  let toPosition = null;
+
+  const fromNum = extractNumber(fromStr.includes('号') ? fromStr : `${fromStr}号`);
+  const toNum = extractNumber(toStr.includes('号') ? toStr : `${toStr}号`);
+  if (fromNum !== null) fromId = fromNum;
+  if (toNum !== null) toId = toNum;
+
+  if (fromId === null) fromPosition = parsePosition(fromStr);
+  if (toId === null) toPosition = parsePosition(toStr);
+
+  if (fromId !== null || toId !== null || fromPosition || toPosition) {
+    return { fromId, toId, fromPosition, toPosition };
+  }
+  return null;
+}
+
+/** 解析箭头朝向（向右/朝上等） */
+function parseArrowDirection(text) {
+  for (const [dir, vec] of Object.entries(DIRECTION_MAP)) {
+    if (text.includes(dir) || text.includes(`朝${dir}`) || text.includes(`向${dir}`) || text.includes(`往${dir}`)) {
+      return vec;
+    }
+  }
+  if (/向右|朝右|往右/.test(text)) return { dx: 1, dy: 0 };
+  if (/向左|朝左|往左/.test(text)) return { dx: -1, dy: 0 };
+  if (/向上|朝上|往上/.test(text)) return { dx: 0, dy: -1 };
+  if (/向下|朝下|往下/.test(text)) return { dx: 0, dy: 1 };
+  return null;
+}
+
+/**
+ * 解析箭头线绘制（须在普通直线之前）
+ * 触发：画一个箭头 / 带箭头的线 / 从A指向B / 画一条从左上角指向右下角的线
+ */
+function parseArrowDraw(text) {
+  const hasArrowWord = /箭头/.test(text) || (/带箭头|有箭头/.test(text) && /线|直线/.test(text));
+  const endpoints = parseDirectedEndpoints(text);
+  const hasDirected = !!endpoints;
+
+  if (!hasArrowWord && !hasDirected) return null;
+  // 连接两对象走 parseConnect，不在这里处理
+  if (/连接|连线|连到|相连|连起来/.test(text)) return null;
+  if (!hasDrawVerb(text) && !hasDirected) return null;
+
+  let color = null;
+  for (const [name, hex] of Object.entries(COLOR_MAP)) {
+    if (text.includes(name)) { color = hex; break; }
+  }
+
+  const position = parsePosition(text);
+  const direction = parseArrowDirection(text);
+
+  return {
+    type: 'draw',
+    shape: 'arrow-line',
+    color,
+    position,
+    direction,
+    fromId: endpoints?.fromId ?? null,
+    toId: endpoints?.toId ?? null,
+    fromPosition: endpoints?.fromPosition ?? null,
+    toPosition: endpoints?.toPosition ?? null,
+  };
+}
 
 // 同音词纠错映射
 const HOMOPHONE_MAP = {
@@ -26,6 +159,8 @@ const HOMOPHONE_MAP = {
   // 操作动词同音词（ASR 常将「画」误识为挂/花）
   '画个': '画一个', '花一个': '画一个', '花个': '画一个',
   '挂一个': '画一个', '挂个': '画个',
+  '零星': '菱形', '凌形': '菱形',
+  '箭头': '箭头', '剑头': '箭头',
   '撤回': '撤销',
 };
 
@@ -70,13 +205,23 @@ export function hasComplexSignal(text) {
   const drawVerbCount = drawVerbs.reduce((n, v) => n + (text.split(v).length - 1), 0);
   if (drawVerbCount >= 2) return true;
 
-  // 条件3：≥2 种不同形状词
-  const shapeWords = ['圆', '矩形', '方形', '方块', '直线', '线段', '三角', '星形', '星星', '椭圆'];
-  const matchedShapes = shapeWords.filter((s) => text.includes(s));
+  // 条件3：≥2 种不同形状词（长词先掩码，避免「圆角矩形」误判为 圆+矩形）
+  let shapeText = text;
+  const compoundMasks = [
+    '圆角矩形', '圆角方块', '跑道形', '胶囊形',
+    '菱形', '钻石形', '椭圆形', '三角形', '五角星',
+    '正方形', '长方形', '箭头线', '箭头直线', '带箭头的线', '有箭头的线',
+  ];
+  for (const m of compoundMasks) {
+    shapeText = shapeText.split(m).join(' ');
+  }
+  const shapeWords = ['圆', '矩形', '方形', '方块', '直线', '线段', '三角', '星形', '星星', '椭圆', '菱形'];
+  const matchedShapes = shapeWords.filter((s) => shapeText.includes(s));
   const uniqueShapes = new Set(matchedShapes.map((s) => {
     if (s === '方形' || s === '方块') return 'rect';
     if (s === '星形' || s === '星星') return 'star';
     if (s === '线段') return 'line';
+    if (s === '菱形') return 'diamond';
     return s;
   }));
   if (uniqueShapes.size >= 2) return true;
@@ -203,55 +348,23 @@ export function parseCommand(text) {
  * 解析绘制指令
  */
 function parseDraw(text) {
-  // 匹配形状关键词（有序数组：长词/复合词优先，避免"椭圆形"被"圆"、"三角形"被"三角"误匹配）
-  const shapeKeywords = [
-    ['ellipse',  ['椭圆形', '椭圆']],
-    ['triangle', ['三角形', '三角']],
-    ['rect',     ['矩形', '长方形', '正方形', '方形', '方块']],
-    ['line',     ['直线', '线段', '线条', '线']],
-    ['star',     ['五角星', '星形', '星星']],
-    ['circle',   ['圆形', '圆圈', '圆']],
-  ];
+  const arrowCmd = parseArrowDraw(text);
+  if (arrowCmd) return arrowCmd;
 
-  let shapeType = null;
-  for (const [type, keywords] of shapeKeywords) {
-    if (keywords.some((kw) => text.includes(kw))) {
-      shapeType = type;
-      break;
-    }
-  }
-
+  const shapeType = resolveShapeType(text);
   if (!shapeType) return null;
+  if (!hasDrawVerb(text)) return null;
 
-  // 必须包含明确的绘制动词才触发
-  const drawVerbs = [
-    '画', '绘制', '绘画', '新建', '创建', '添加', '生成',
-    '来个', '来一个', '整个', '整一个', '加个', '加一个',
-    '做个', '做一个', '弄个', '弄一个',
-    // 口语化表达扩充
-    '搞个', '搞一个', '要个', '要一个', '给我画', '给我一个',
-    '帮我画', '帮我整', '帮我做', '搞出', '整出', '弄出',
-    '来一', '整一', '画出', '弄一', '搞一',
-  ];
-  if (!drawVerbs.some((v) => text.includes(v))) return null;
-
-  // 提取颜色
   let color = null;
   for (const [name, hex] of Object.entries(COLOR_MAP)) {
-    if (text.includes(name)) {
-      color = hex;
-      break;
-    }
+    if (text.includes(name)) { color = hex; break; }
   }
 
-  // 提取大小 —— 先去掉"大小""不大不小""合适大小"等中性词，防止误判
   let sizeModifier = null;
   const sizeText = text.replace(/大小|不大不小|合适大小|适中大小|适当大小/g, '');
   if (sizeText.includes('大') || sizeText.includes('巨')) sizeModifier = 'large';
   else if (sizeText.includes('小')) sizeModifier = 'small';
 
-  // 检测相对位置（"在1号右边画圆" / "在3号上方画矩形"）
-  // 优先级高于绝对位置
   const relMatch = text.match(/在\s*(\d+|[一二三四五六七八九十]+)\s*号\s*(右边|左边|上面|下面|上方|下方|左方|右方|右侧|左侧|旁边)/);
   let relativeToId = null;
   let relativeSide = null;
@@ -261,7 +374,6 @@ function parseDraw(text) {
     relativeSide = parseSide(relMatch[2]);
   }
 
-  // 绝对位置（"在右上角画圆"，无相对目标时使用）
   const position = relativeToId ? null : parsePosition(text);
 
   return {
@@ -345,25 +457,8 @@ function parseSelect(text) {
 
   // "选中红色的圆"
   if (text.includes('选中') || text.includes('选择') || text.includes('点击')) {
-    // 提取形状
-    let shapeType = null;
-    const shapeKeywords = [
-      ['ellipse',  ['椭圆形', '椭圆']],
-      ['triangle', ['三角形', '三角']],
-      ['rect',     ['矩形', '方形', '方块']],
-      ['line',     ['直线', '线']],
-      ['star',     ['星形', '星星', '星']],
-      ['circle',   ['圆形', '圆']],
-    ];
-    for (const [type, keywords] of shapeKeywords) {
-      if (keywords.some((kw) => text.includes(kw))) {
-        shapeType = type;
-        break;
-      }
-    }
-
+    const shapeType = resolveShapeType(text);
     if (shapeType) {
-      // 同时携带位置信息（"选中左上角的圆"），供执行层按距离就近选
       const position = parsePosition(text);
       return { type: 'select', target: { type: 'shape', shapeType, position } };
     }
@@ -683,22 +778,10 @@ function parseBatch(text) {
       if (!text.includes(word)) continue;
 
       // 确保数字词后面紧跟"个/条"等量词（避免误匹配"二月"等）
-      const qtyRe = new RegExp(`${word}\\s*[个条枚张]?`);
+      const qtyRe = new RegExp(`${word}\\s*[个条枚张根]`);
       if (!qtyRe.test(text)) continue;
 
-      // 找形状
-      const shapeKeywords = [
-        ['ellipse', ['椭圆形', '椭圆']],
-        ['triangle', ['三角形', '三角']],
-        ['rect', ['矩形', '长方形', '正方形', '方形', '方块']],
-        ['line', ['直线', '线段', '线条', '线']],
-        ['star', ['五角星', '星形', '星星']],
-        ['circle', ['圆形', '圆圈', '圆']],
-      ];
-      let shapeType = null;
-      for (const [type, kws] of shapeKeywords) {
-        if (kws.some((kw) => text.includes(kw))) { shapeType = type; break; }
-      }
+      const shapeType = resolveShapeType(text);
       if (!shapeType) continue;
 
       let color = null;
@@ -725,19 +808,7 @@ function parseBatch(text) {
   }
   if (!color) return null;
 
-  // 可选：限定形状类型（"把所有圆改成蓝色" 中的"圆"）
-  const shapeKeywords = [
-    ['ellipse', ['椭圆形', '椭圆']],
-    ['triangle', ['三角形', '三角']],
-    ['rect', ['矩形', '方形', '方块']],
-    ['line', ['直线', '线']],
-    ['star', ['星形', '星星', '星']],
-    ['circle', ['圆形', '圆']],
-  ];
-  let filterShape = null;
-  for (const [type, kws] of shapeKeywords) {
-    if (kws.some((kw) => text.includes(kw))) { filterShape = type; break; }
-  }
+  const filterShape = resolveShapeType(text);
 
   return { type: 'batch-color', color, filterShape };
 }
@@ -800,23 +871,13 @@ function parseShapeChange(text) {
   const changeVerbs = ['改成', '变成', '换成', '改为', '变为', '换为', '换个形', '改个形'];
   if (!changeVerbs.some((v) => text.includes(v))) return null;
 
-  // 必须含形状关键词（长词优先避免"圆"匹配"椭圆"内部）
-  const shapeKeywords = [
-    ['ellipse',  ['椭圆形', '椭圆']],
-    ['triangle', ['三角形', '三角']],
-    ['rect',     ['矩形', '长方形', '正方形', '方形', '方块']],
-    ['line',     ['直线', '线段', '线条']],
-    ['star',     ['五角星', '星形', '星星']],
-    ['circle',   ['圆形', '圆圈', '圆']],
-  ];
-
-  let shape = null;
-  for (const [type, keywords] of shapeKeywords) {
-    if (keywords.some((kw) => text.includes(kw))) { shape = type; break; }
+  let shape = resolveShapeType(text);
+  // 形状变更：箭头线
+  if (!shape && /箭头线|箭头直线|带箭头的线|有箭头的线|箭头/.test(text)) {
+    shape = 'arrow-line';
   }
   if (!shape) return null;
 
-  // 含绘制动词 → 这是绘制指令，让 parseDraw 处理
   const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成'];
   if (drawVerbs.some((v) => text.includes(v))) return null;
 
@@ -848,7 +909,6 @@ function parseLLMIntent(text, original) {
 
   const softLLMShapes = [
     '流程',                      // "请假审批流程" 不带「图」字
-    '房子', '树', '花', '汽车', '地图',
   ];
   const drawVerbs = [
     '画', '绘制', '生成', '创建', '新建', '做个', '来一个', '整一个', '帮我画',
@@ -878,15 +938,15 @@ function parseLLMIntent(text, original) {
 export function detectKeywords(text) {
   const keywords = { color: null, colorName: null, shape: null, size: null, position: null, hasDrawIntent: false };
 
-  // 检测绘制意图（必须包含这些词才触发预览）
   const drawIntentWords = [
     '画', '绘制', '绘画', '新建', '创建', '添加',
     '加一个', '来一个', '画一个', '来个', '整一个',
     '搞个', '搞一个', '要个', '要一个', '给我画', '给我一个', '帮我画',
+    '一条线', '一根线', '画一条', '画一根', '箭头',
   ];
-  keywords.hasDrawIntent = drawIntentWords.some((w) => text.includes(w));
+  keywords.hasDrawIntent = drawIntentWords.some((w) => text.includes(w))
+    || /从.+指向/.test(text);
 
-  // 检测颜色
   for (const [name, hex] of Object.entries(COLOR_MAP)) {
     if (text.includes(name)) {
       keywords.color = hex;
@@ -895,25 +955,11 @@ export function detectKeywords(text) {
     }
   }
 
-  // 检测形状（从长到短匹配，避免"三角"优先于"三角形"）
-  const shapeMap = [
-    ['三角形', '三角形'], ['矩形', '矩形'], ['椭圆形', '椭圆'], ['椭圆', '椭圆'],
-    ['方形', '方形'], ['方块', '方块'], ['直线', '直线'], ['三角', '三角形'],
-    ['星星', '星形'], ['星形', '星形'], ['圆形', '圆形'], ['圆', '圆形'],
-    ['线', '直线'], ['星', '星形'],
-  ];
-  for (const [key, value] of shapeMap) {
-    if (text.includes(key)) {
-      keywords.shape = value;
-      break;
-    }
-  }
+  keywords.shape = detectShapeLabel(text);
 
-  // 检测大小
   if (text.includes('大') || text.includes('放大')) keywords.size = 'large';
   else if (text.includes('小') || text.includes('缩小')) keywords.size = 'small';
 
-  // 检测位置（用于预览定位）
   const position = parsePosition(text);
   if (position) keywords.position = position;
 
