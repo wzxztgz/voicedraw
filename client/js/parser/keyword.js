@@ -27,6 +27,39 @@ function resolveShapeType(text) {
   return null;
 }
 
+/**
+ * 形状关键词误匹配黑名单
+ * 单字关键词（如「圆」）容易误命中「花园」「花圆」「圆满」等非形状词
+ */
+const SHAPE_FALSE_POSITIVES = {
+  circle: ['花园', '花圆', '圆满', '原理', '圆桌', '园区', '圆润', '圆滑'],
+  line:   [],
+  rect:   [],
+  triangle: [],
+  star:   [],
+  ellipse: [],
+  diamond: [],
+  'rounded-rect': [],
+};
+
+/**
+ * 严格版形状解析：单字关键词额外过滤误匹配词
+ * 用于置信度评估 (_assessConfidence) 和 parseSelect 否定守卫
+ */
+function resolveShapeTypeStrict(text) {
+  for (const [type, keywords] of SHAPE_KEYWORDS) {
+    for (const kw of keywords) {
+      if (!text.includes(kw)) continue;
+      if (kw.length === 1) {
+        const fps = SHAPE_FALSE_POSITIVES[type] || [];
+        if (fps.some((fp) => text.includes(fp))) continue;
+      }
+      return type;
+    }
+  }
+  return null;
+}
+
 const DRAW_VERBS = [
   '画', '绘制', '绘画', '新建', '创建', '添加', '生成',
   '来个', '来一个', '整个', '整一个', '加个', '加一个',
@@ -166,9 +199,20 @@ const HOMOPHONE_MAP = {
 
 /**
  * 应用同音词纠错
+ * 分两轮：先语境优先纠错（精准），再全局模糊替换（兜底）。
+ * 语境纠错必须先于全局替换，防止「花园→花圆」后二次误匹配。
  */
 function correctHomophones(text) {
   let corrected = text;
+
+  // 第一轮：语境优先纠错
+  // 「在N号+方位词」语境下，「花园/花一个」极大概率是「画圆/画一个」的 ASR 误识
+  const relCtxRe = /在\s*[\d一二三四五六七八九十]+\s*号\s*的?\s*(?:右边|右方|右侧|右面|旁边|左边|左方|左侧|左面|上面|上方|上边|上侧|下面|下方|下边|下侧)/;
+  if (relCtxRe.test(corrected)) {
+    corrected = corrected.replace(/花园/g, '画圆').replace(/花一个/g, '画一个');
+  }
+
+  // 第二轮：全局模糊替换
   for (const [wrong, right] of Object.entries(HOMOPHONE_MAP)) {
     corrected = corrected.replace(new RegExp(wrong, 'g'), right);
   }
@@ -344,14 +388,46 @@ export function parseCommand(text) {
   return { type: 'unknown', text };
 }
 
+// 所有方位词（与 parseSide 保持一致），用于相对位置的高置信度判断
+const SIDE_WORD_PATTERN = '右边|右方|右侧|右面|旁边|左边|左方|左侧|左面|上面|上方|上边|上侧|下面|下方|下边|下侧';
+const SIDE_WORD_RE = new RegExp(SIDE_WORD_PATTERN);
+
+// 相对位置主匹配正则：允许编号和方位词之间夹一个「的」字（ASR 常带出）
+// 例：在1号右边 / 在1号的右边 / 在三号上面
+const REL_MATCH_RE = new RegExp(
+  `在\\s*(\\d+|[一二三四五六七八九十]+)\\s*号\\s*的?\\s*(${SIDE_WORD_PATTERN})`
+);
+
+/**
+ * 全局歧义信号检测（基于纠错后文本）
+ * 供 _assessConfidence 和 parseSelect 否定守卫使用，不影响规则解析逻辑本身。
+ */
+function detectAmbiguitySignals(text) {
+  const hasNumberRef = /在\s*[\d一二三四五六七八九十]+\s*号|[\d一二三四五六七八九十]+\s*号/.test(text);
+  const hasSideWord = SIDE_WORD_RE.test(text);
+  return {
+    hasRelativeContext: hasNumberRef && hasSideWord,
+    hasDrawVerb: hasDrawVerb(text),
+    hasShapeHint: resolveShapeTypeStrict(text) !== null,
+    isLongSentence: text.length > 12,
+    hasLocationPrefix: text.startsWith('在'),
+  };
+}
+
 /**
  * 解析绘制指令
+ *
+ * 相对位置置信度规则：
+ *   ① 文本含"在N号"且含方位词，但 REL_MATCH_RE 未匹配 → 低置信度，返回 null 降级 LLM
+ *   ② REL_MATCH_RE 匹配但 parseSide 返回 null（方位词无法归类）→ 同上，返回 null 降级 LLM
+ * 以上两种情况均不得静默 fallback 到绝对位置，以免「在1号的右边画圆」
+ * 被误解析为九宫格的「右边」。
  */
 function parseDraw(text) {
   const arrowCmd = parseArrowDraw(text);
   if (arrowCmd) return arrowCmd;
 
-  const shapeType = resolveShapeType(text);
+  const shapeType = resolveShapeTypeStrict(text);
   if (!shapeType) return null;
   if (!hasDrawVerb(text)) return null;
 
@@ -365,13 +441,23 @@ function parseDraw(text) {
   if (sizeText.includes('大') || sizeText.includes('巨')) sizeModifier = 'large';
   else if (sizeText.includes('小')) sizeModifier = 'small';
 
-  const relMatch = text.match(/在\s*(\d+|[一二三四五六七八九十]+)\s*号\s*(右边|左边|上面|下面|上方|下方|左方|右方|右侧|左侧|旁边)/);
+  // ── 相对位置解析（高置信度检测）──────────────────────────────
+  const hasNumberRef = /在\s*[\d一二三四五六七八九十]+\s*号/.test(text);
+  const hasSideWord = SIDE_WORD_RE.test(text);
+
+  const relMatch = REL_MATCH_RE.exec(text);
+
+  // ① 明显尝试了相对位置但正则未能精确匹配 → 降级 LLM
+  if (hasNumberRef && hasSideWord && !relMatch) return null;
+
   let relativeToId = null;
   let relativeSide = null;
   if (relMatch) {
     const numStr = relMatch[1];
     relativeToId = parseInt(numStr) || chineseNumToInt(numStr);
     relativeSide = parseSide(relMatch[2]);
+    // ② 方位词识别失败（parseSide 兜底不到已知方向）→ 降级 LLM
+    if (!relativeSide) return null;
   }
 
   const position = relativeToId ? null : parsePosition(text);
@@ -431,31 +517,43 @@ function extractTarget(text) {
 
 /**
  * 解析选中指令
+ *
+ * 置信度策略：「有编号」≠「想选中」，必须结合语境。
+ * 三重否定守卫拦截高风险歧义句，避免「在一号右边花园」被误判为选中 1 号。
  */
 function parseSelect(text) {
-  // "选中3号" / "选中三号" / "第2个" / "第二个"
   const num = extractNumber(text);
-  if (num !== null) {
-    const hasSelectVerb = text.includes('选中') || text.includes('选择') || text.includes('点击');
-    // 含有操作动词（移/改/放大等）但无选中词 → 这是针对目标的操作指令，不是选中指令
-    // 交给 parseMove / parseColorChange / parseSizeChange 处理（它们会通过 extractTarget 获取目标）
+  if (num === null) return null;
+
+  const hasSelectVerb = text.includes('选中') || text.includes('选择') || text.includes('点击');
+
+  // ── 三重否定守卫：以下情况即使含编号也不默认选中 ──────────────
+  if (!hasSelectVerb) {
+    // ① 「在N号+方位词」→ 明显是相对绘制/标注意图（如「在一号右边花园」）
+    const hasRelCtx = /在\s*[\d一二三四五六七八九十]+\s*号/.test(text) && SIDE_WORD_RE.test(text);
+    if (hasRelCtx) return null;
+
+    // ② 含形状词（严格版，过滤「花园→圆」等误匹配）→ 可能是绘制意图
+    if (resolveShapeTypeStrict(text) !== null) return null;
+
+    // ③ 以「在」开头的长句（≥8字）→ 描述性语境，绝非选中
+    if (text.startsWith('在') && text.length >= 8) return null;
+
+    // ④ 含操作动词 → 交给对应解析器处理
     const hasActionVerb = [
       '移', '放大', '缩小', '变大', '变小',
       '改成', '变成', '换成', '改为', '变为', '换为', '调成', '修改', '调整',
       '删除', '删掉', '移除', '去掉', '擦掉', '擦除',
-      '连接', '连线', '连到', '相连',          // 连线指令
-      '画', '绘制', '新建', '创建',             // 绘制（"在1号右边画圆"）
-      '加文字', '添加文字', '写上', '标注',     // 文字标注
-      '将', '把',                               // "将1号改为红色" / "把3号变成蓝色"
+      '连接', '连线', '连到', '相连',
+      '画', '绘制', '新建', '创建',
+      '加文字', '添加文字', '写上', '标注',
+      '将', '把',
     ].some((v) => text.includes(v));
-    if (hasActionVerb && !hasSelectVerb) {
-      // 不拦截，让操作解析器处理
-    } else {
-      return { type: 'select', target: { type: 'id', value: num } };
-    }
+    if (hasActionVerb) return null;
   }
+  // ──────────────────────────────────────────────────────────────
 
-  return null;
+  return { type: 'select', target: { type: 'id', value: num } };
 }
 
 /**
@@ -507,7 +605,7 @@ function extractAllNumbers(text) {
 function parseSide(text) {
   if (text.includes('右边') || text.includes('右方') || text.includes('右侧') || text.includes('右面') || text.includes('旁边')) return 'right';
   if (text.includes('左边') || text.includes('左方') || text.includes('左侧') || text.includes('左面')) return 'left';
-  if (text.includes('上方') || text.includes('上边') || text.includes('上侧')) return 'above';
+  if (text.includes('上面') || text.includes('上方') || text.includes('上边') || text.includes('上侧')) return 'above';
   if (text.includes('下面') || text.includes('下方') || text.includes('下边') || text.includes('下侧')) return 'below';
   // 无明确方位 → 返回 null（文字标注默认居中到图形内部）
   return null;
@@ -642,6 +740,9 @@ function parseColorChange(text) {
  * 必须包含完整的缩放动词短语，避免"画一个大圆"等误触发
  */
 function parseSizeChange(text) {
+  // 含绘制动词时可能是「画一个大圆」等描述句，不是缩放指令
+  if (hasDrawVerb(text)) return null;
+
   // 放大类动词短语
   const enlargeVerbs = [
     '放大', '变大', '调大', '改大', '大一点', '大一些', '大很多',
@@ -772,7 +873,7 @@ function parseBatch(text) {
       const qtyRe = new RegExp(`${word}\\s*[个条枚张根]`);
       if (!qtyRe.test(text)) continue;
 
-      const shapeType = resolveShapeType(text);
+      const shapeType = resolveShapeTypeStrict(text);
       if (!shapeType) continue;
 
       let color = null;
@@ -799,7 +900,7 @@ function parseBatch(text) {
   }
   if (!color) return null;
 
-  const filterShape = resolveShapeType(text);
+  const filterShape = resolveShapeTypeStrict(text);
 
   return { type: 'batch-color', color, filterShape };
 }
@@ -862,7 +963,7 @@ function parseShapeChange(text) {
   const changeVerbs = ['改成', '变成', '换成', '改为', '变为', '换为', '换个形', '改个形'];
   if (!changeVerbs.some((v) => text.includes(v))) return null;
 
-  let shape = resolveShapeType(text);
+  let shape = resolveShapeTypeStrict(text);
   // 形状变更：箭头线
   if (!shape && /箭头线|箭头直线|带箭头的线|有箭头的线|箭头/.test(text)) {
     shape = 'arrow-line';
@@ -916,6 +1017,98 @@ function parseLLMIntent(text, original) {
     return { type: 'llm-draw', prompt };
   }
   return null;
+}
+
+/**
+ * 置信度评估（仅供 parseCommandWithConfidence 内部调用）
+ *
+ * 规则：
+ *   'high' → 规则直接执行，不走 LLM，<5ms，0 token
+ *   'low'  → 转交 LLM 兜底解析
+ *
+ * 只对容易误判的 select / draw / color / resize 做额外信号校验；
+ * 其他类型有明确触发词，匹配即高置信。
+ */
+function _assessConfidence(command, signals) {
+  if (!command || command.type === 'unknown') return 'low';
+
+  switch (command.type) {
+    case 'llm-draw':
+      return 'high'; // parseLLMIntent 明确触发，直接信任
+
+    case 'select':
+      // parseSelect 已加三重否定守卫，能走到这里置信度足够
+      return 'high';
+
+    case 'draw':
+      if (command.shape === 'arrow-line') return 'high';
+      if (command.relativeToId && command.relativeSide) return 'high';
+      // 标准绘制：严格形状解析 + 绘制动词同时命中才算高置信
+      if (signals.hasDrawVerb && signals.hasShapeHint) return 'high';
+      return 'low';
+
+    case 'color':
+      // 含绘制动词时，可能是「画一个红色圆」被误分类
+      if (signals.hasDrawVerb) return 'low';
+      return 'high';
+
+    case 'resize':
+      // parseSizeChange 已有 hasDrawVerb 前置守卫，这里作双保险
+      if (signals.hasDrawVerb) return 'low';
+      return 'high';
+
+    // 以下类型有明确触发词，匹配即高置信
+    case 'move':
+    case 'moveTo':
+    case 'delete':
+    case 'connect':
+    case 'addText':
+    case 'modifyText':
+    case 'shapeChange':
+    case 'batch-draw':
+    case 'batch-color':
+    case 'compound':
+    case 'refine':
+    case 'undo':
+    case 'redo':
+    case 'clear':
+    case 'help':
+    case 'closeHelp':
+    case 'confirm':
+    case 'cancel':
+      return 'high';
+
+    default:
+      return 'low';
+  }
+}
+
+/**
+ * 带置信度的主解析入口（供 _processCommand 使用）
+ *
+ * 在规则解析结果上叠加置信度评估：
+ *   confidence === 'high' → 规则直接执行（<5ms，0 LLM token）
+ *   confidence !== 'high' → 转交 LLM 兜底（含语义理解）
+ *
+ * @param {string} rawText 原始 ASR 文本
+ * @returns {{ command: object, confidence: 'high'|'low', signals: object }}
+ */
+export function parseCommandWithConfidence(rawText) {
+  const normalized = correctHomophones(rawText.trim().toLowerCase());
+  const signals = detectAmbiguitySignals(normalized);
+  const command = parseCommand(rawText);
+  const confidence = _assessConfidence(command, signals);
+
+  console.log('[Parser]', {
+    text: normalized,
+    type: command?.type,
+    confidence,
+    relCtx: signals.hasRelativeContext,
+    drawVerb: signals.hasDrawVerb,
+    shapeHint: signals.hasShapeHint,
+  });
+
+  return { command, confidence, signals };
 }
 
 /**

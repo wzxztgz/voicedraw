@@ -6,7 +6,7 @@
 import store from './state/store.js';
 import Renderer from './canvas/renderer.js';
 import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName, getShapeBounds, getShapeEdgePoint } from './canvas/shapes.js';
-import { parseCommand, detectKeywords, hasComplexSignal } from './parser/keyword.js';
+import { parseCommandWithConfidence, detectKeywords, hasComplexSignal } from './parser/keyword.js';
 import { positionToCoords } from './canvas/grid.js';
 import contextManager from './parser/context.js';
 import voiceRecorder from './voice/recorder.js';
@@ -390,35 +390,39 @@ class VoiceDrawApp {
 
   /**
    * 处理最终指令
-   * 三层路由策略：
-   *   Layer 1 (规则快路径)：单动作高频指令，<50ms 响应
-   *   Layer 2 (LLM 结构解析)：检测到复杂信号时主动路由，不等规则误判
-   *   Layer 3 (LLM 图形生成)：parseLLMIntent 触发，已在 parseCommand 内处理
+   * 置信度路由策略：
+   *   Layer 1：复杂结构信号 → 直接 LLM（不让规则误判）
+   *   Layer 2：parseCommandWithConfidence → confidence==='high' 则规则执行，否则 LLM 兜底
+   *   Layer 3（内含）：parseLLMIntent → llm-draw → _execLLMDraw（描述模式）
+   *
+   * 简单指令路径（画圆/撤销/选中等）与之前完全相同，无额外开销。
+   * 只有规则低置信度句子才多走一次 LLM。
    */
   _processCommand(text) {
     if (this.previewTimeout) clearTimeout(this.previewTimeout);
 
-    // Layer 2：主动复杂信号检测
-    // 当句子结构上就属于多动作复合指令时，直接交给 LLM 解析，
-    // 而不是等规则"误判成功"返回一个错误的单条指令。
+    // Layer 1：复杂结构信号主动路由
+    // 多动作复合句直接交给 LLM，不等规则误判成单条指令。
     if (hasComplexSignal(text)) {
-      console.log('[VoiceDraw] Complex signal detected, routing to LLM:', text);
+      console.log('[VoiceDraw] Complex signal → LLM:', text);
       store.cancelPreview();
       this._llmFallbackParse(text);
       return;
     }
 
-    // Layer 1：规则快路径
-    const command = parseCommand(text);
+    // Layer 2：置信度规则解析
+    // 高置信度（规则明确命中）→ 直接执行，<5ms，0 LLM token
+    // 低置信度（规则不确定）→ LLM 兜底，保证语义正确
+    const { command, confidence } = parseCommandWithConfidence(text);
 
-    if (!command || command.type === 'unknown') {
-      // 规则无法识别 → LLM 兜底
-      store.cancelPreview();
-      this._llmFallbackParse(text);
+    if (confidence === 'high') {
+      this._executeCommand(command, text);
       return;
     }
 
-    this._executeCommand(command, text);
+    // 规则低置信 / unknown → LLM 兜底
+    store.cancelPreview();
+    this._llmFallbackParse(text);
   }
 
   /**
@@ -482,7 +486,10 @@ class VoiceDrawApp {
           type: 'draw',
           shape: r.shape || 'circle',
           color: r.color || null,
-          position: r.position || null,     // { dx, dy } — 与 positionToCoords 兼容
+          position: r.position || null,         // { dx, dy } — 与 positionToCoords 兼容
+          relativeToId: r.relativeToId ?? null, // LLM 返回的相对位置目标编号
+          relativeSide: r.relativeSide ?? null, // right/left/above/below
+          sizeModifier: r.sizeModifier ?? null,
         };
       case 'color':
         if (!r.color) return null;
@@ -709,10 +716,15 @@ class VoiceDrawApp {
       let finalY = preview.y;
       if (command.relativeToId) {
         const refObj = store.getObjectByNumber(command.relativeToId);
-        if (refObj) {
-          const pos = this._sideCoords(refObj, command.relativeSide);
-          finalX = pos.x; finalY = pos.y;
+        if (!refObj) {
+          const msg = `未找到 ${command.relativeToId} 号对象，无法确定绘制位置`;
+          voiceSynth.speak(msg);
+          this.toast.warning(msg);
+          store.cancelPreview();
+          return null;
         }
+        const pos = this._sideCoords(refObj, command.relativeSide);
+        finalX = pos.x; finalY = pos.y;
       } else if (command.position) {
         const coords = positionToCoords(command.position, W, H);
         finalX = coords.x;
@@ -734,10 +746,14 @@ class VoiceDrawApp {
     let x = W / 2, y = H / 2;
     if (command.relativeToId) {
       const refObj = store.getObjectByNumber(command.relativeToId);
-      if (refObj) {
-        const pos = this._sideCoords(refObj, command.relativeSide);
-        x = pos.x; y = pos.y;
+      if (!refObj) {
+        const msg = `未找到 ${command.relativeToId} 号对象，无法确定绘制位置`;
+        voiceSynth.speak(msg);
+        this.toast.warning(msg);
+        return null;
       }
+      const pos = this._sideCoords(refObj, command.relativeSide);
+      x = pos.x; y = pos.y;
     } else if (command.position) {
       const coords = positionToCoords(command.position, W, H);
       x = coords.x;

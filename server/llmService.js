@@ -167,9 +167,14 @@ const PARSE_SYSTEM_PROMPT = `你是一个语音绘图指令解析器。将中文
 【单条命令格式】
 
 绘制图形（shape: circle/rect/line/triangle/star/ellipse/diamond/rounded-rect/arrow-line）：
-{"type":"draw","shape":"circle","color":"#FF6B6B","position":{"dx":0,"dy":0}}
+绝对位置：{"type":"draw","shape":"circle","color":"#FF6B6B","position":{"dx":0,"dy":0}}
 shape 取值：circle=圆形 rect=矩形 rounded-rect=圆角矩形 diamond=菱形 arrow-line=箭头线
 color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，左=-1右=1上=-1下=1
+若用户描述「在N号（右边/左边/上面/下面/旁边）画某形状」，使用相对位置格式（与 position 互斥）：
+{"type":"draw","shape":"rect","relativeToId":1,"relativeSide":"right"}
+relativeSide 取值：right=右 left=左 above=上 below=下
+注意：即使句中无「画」字，「在N号方位+形状词」也是绘制意图，用相对位置格式
+注意：禁止将「在N号方位+形状」解析为 select；「花园」「花圆」在此语境下均代表「画圆」
 
 修改颜色：{"type":"color","color":"#FF6B6B","targetId":3}  （targetId 无指定则 null）
 
