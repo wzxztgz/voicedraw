@@ -4,8 +4,8 @@
 
 // ─── 工具 ──────────────────────────────────────────────────
 
-function sysText(x, y, content, fontSize = 13, color = '#333333', textAlign = 'center') {
-  return { type: 'text', x, y, content: String(content), fontSize, color, textAlign, _system: true };
+function sysText(x, y, content, fontSize = 13, color = '#333333', textAlign = 'center', extra = {}) {
+  return { type: 'text', x, y, content: String(content), fontSize, color, textAlign, _system: true, ...extra };
 }
 
 function sysLine(x, y, x2, y2, color = '#aaa', lineWidth = 1.5) {
@@ -21,8 +21,8 @@ function sysOrthoLine(x, y, x2, y2, color = '#888', lineWidth = 1.8, extra = {})
  * 贝塞尔曲线连线（思维导图专用）
  * cx1/cy1、cx2/cy2 为两个控制点，渲染器用 bezierCurveTo 绘制
  */
-function sysCurve(x, y, cx1, cy1, cx2, cy2, x2, y2, color = '#aaa', lineWidth = 2) {
-  return { type: 'curve', x, y, cx1, cy1, cx2, cy2, x2, y2, color, lineWidth, _system: true };
+function sysCurve(x, y, cx1, cy1, cx2, cy2, x2, y2, color = '#aaa', lineWidth = 2, extra = {}) {
+  return { type: 'curve', x, y, cx1, cy1, cx2, cy2, x2, y2, color, lineWidth, _system: true, ...extra };
 }
 
 /** 把点限制在画布安全区内 */
@@ -102,23 +102,28 @@ export function renderFlowchart(config, W, H) {
       const sideX = goRight
         ? Math.max(x1, x2) + nodeW / 2 + 48
         : Math.min(x1, x2) - nodeW / 2 - 48;
-      shapes.push(sysOrthoLine(x1, y1, x2, y2, '#888', 1.8, { _loopback: true, _sideX: sideX }));
+      shapes.push(sysOrthoLine(x1, y1, x2, y2, '#888', 1.8, {
+        _loopback: true, _sideX: sideX,
+        _tmpEdgeFrom: e.from, _tmpEdgeTo: e.to,
+      }));
 
       if (e.label) {
-        shapes.push(sysText(sideX + (goRight ? 10 : -10), (y1 + y2) / 2, e.label, 11, '#666', goRight ? 'left' : 'right'));
+        shapes.push(sysText(sideX + (goRight ? 10 : -10), (y1 + y2) / 2, e.label, 11, '#666', goRight ? 'left' : 'right',
+          { _tmpEdgeFrom: e.from, _tmpEdgeTo: e.to }));
       }
       return;
     }
 
     // 正向折线（内部包含箭头渲染）
-    shapes.push(sysOrthoLine(x1, y1, x2, y2));
+    shapes.push(sysOrthoLine(x1, y1, x2, y2, '#888', 1.8, { _tmpEdgeFrom: e.from, _tmpEdgeTo: e.to }));
 
     // 边标签：放在水平段中点处，向右偏移避免遮线
     if (e.label) {
       const isStraight = Math.abs(x1 - x2) < 2;
       const lx = isStraight ? x1 + 14 : (x1 + x2) / 2;
       const ly = isStraight ? (y1 + y2) / 2 : midY - 10;
-      shapes.push(sysText(lx, ly, e.label, 11, '#666', isStraight ? 'left' : 'center'));
+      shapes.push(sysText(lx, ly, e.label, 11, '#666', isStraight ? 'left' : 'center',
+        { _tmpEdgeFrom: e.from, _tmpEdgeTo: e.to }));
     }
   });
 
@@ -133,16 +138,15 @@ export function renderFlowchart(config, W, H) {
     const color = COLORS[shapeKey];
 
     if (shapeKey === 'oval') {
-      // 开始/结束节点：标准流程图规范使用圆角矩形（pill 形）
-      shapes.push({ type: 'rounded-rect', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text });
+      shapes.push({ type: 'rounded-rect', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text, _tmpNodeId: n.id });
     } else if (shapeKey === 'diamond') {
-      shapes.push({ type: 'diamond', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text });
+      shapes.push({ type: 'diamond', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text, _tmpNodeId: n.id });
     } else {
-      shapes.push({ type: 'rect', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text });
+      shapes.push({ type: 'rect', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text, _tmpNodeId: n.id });
     }
 
-    // 节点文字（白色，居中）
-    shapes.push(sysText(x, y, n.text, 13, '#333333'));
+    // 节点文字（居中于节点，随节点移动）
+    shapes.push(sysText(x, y, n.text, 13, '#333333', 'center', { _tmpNodeLabel: n.id }));
   });
 
   return shapes;
@@ -178,9 +182,9 @@ export function renderMindmap(config, W, H) {
     type: 'ellipse', x: cx, y: cy,
     rx: rootRx, ry: rootRy,
     color: '#FF6B6B', lineWidth: 2.5,
-    _nodeText: root,
+    _nodeText: root, _tmpNodeId: '__root',
   });
-  shapes.push(sysText(cx, cy, root, 15, '#333333'));
+  shapes.push(sysText(cx, cy, root, 15, '#333333', 'center', { _tmpNodeLabel: '__root' }));
 
   // ── 一级分支 ──
   branches.forEach((branch, bi) => {
@@ -194,16 +198,17 @@ export function renderMindmap(config, W, H) {
     const color = BRANCH_COLORS[bi % BRANCH_COLORS.length];
 
     // 贝塞尔曲线：从根椭圆边缘 → 一级分支节点
-    // 控制点沿主方向延伸，让曲线从中心"流出"再弯向目标节点
     const ex  = cx + cos * rootRx;
     const ey  = cy + sin * rootRy;
-    const cpDist = r1 * 0.55; // 控制点距离
+    const cpDist = r1 * 0.55;
+    const branchKey = `b${bi}`;
     shapes.push(sysCurve(
       ex, ey,
-      ex + cos * cpDist, ey + sin * cpDist,   // 控制点1：从根沿主方向延伸
-      bx - cos * cpDist * 0.4, by - sin * cpDist * 0.4, // 控制点2：靠近目标节点
+      ex + cos * cpDist, ey + sin * cpDist,
+      bx - cos * cpDist * 0.4, by - sin * cpDist * 0.4,
       bx, by,
       color, 2.5,
+      { _tmpEdgeFrom: '__root', _tmpEdgeTo: branchKey },
     ));
 
     // 一级节点
@@ -211,9 +216,9 @@ export function renderMindmap(config, W, H) {
       type: 'rect', x: bx, y: by,
       width: branchW, height: branchH,
       color, lineWidth: 2,
-      _nodeText: branch.text,
+      _nodeText: branch.text, _tmpNodeId: branchKey,
     });
-    shapes.push(sysText(bx, by, branch.text, 13, '#333333'));
+    shapes.push(sysText(bx, by, branch.text, 13, '#333333', 'center', { _tmpNodeLabel: branchKey }));
 
     // ── 二级分支 ──
     const children = branch.children || [];
@@ -239,21 +244,23 @@ export function renderMindmap(config, W, H) {
       const ex2   = bx + ccx * (branchW / 2);
       const ey2   = by + ccy * (branchH / 2);
       const cp2Dist = r2 * 0.5;
+      const childKey = `b${bi}c${ci}`;
       shapes.push(sysCurve(
         ex2, ey2,
         ex2 + ccx * cp2Dist, ey2 + ccy * cp2Dist,
         cx2 - ccx * cp2Dist * 0.3, cy2 - ccy * cp2Dist * 0.3,
         cx2, cy2,
         cColor, 1.8,
+        { _tmpEdgeFrom: branchKey, _tmpEdgeTo: childKey },
       ));
 
       shapes.push({
         type: 'rect', x: cx2, y: cy2,
         width: childW, height: childH,
         color: cColor, lineWidth: 1.5,
-        _nodeText: child,
+        _nodeText: child, _tmpNodeId: childKey,
       });
-      shapes.push(sysText(cx2, cy2, child, 12, '#333333'));
+      shapes.push(sysText(cx2, cy2, child, 12, '#333333', 'center', { _tmpNodeLabel: childKey }));
     });
   });
 

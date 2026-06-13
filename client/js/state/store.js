@@ -182,9 +182,16 @@ class Store {
   removeObject(id) {
     this.pushHistory();
     this._state.objects = this._state.objects.filter((o) => o.id !== id);
-    // 移除以已删除对象为任意端点的孤立连线
+    // 级联删除：
+    //   1. 手绘连线（_fromId / _toId）
+    //   2. 子文字标签（_parentId）—— LLM 图节点上的文字
+    //   3. LLM 图结构边（_edgeFromId / _edgeToId）—— ortho / curve 连线
     this._state.objects = this._state.objects.filter(
-      (o) => !(o._fromId === id || o._toId === id)
+      (o) => !(
+        o._fromId === id || o._toId === id ||
+        o._parentId === id ||
+        o._edgeFromId === id || o._edgeToId === id
+      )
     );
     this.set('objects', [...this._state.objects]);
     if (this._state.selectedId === id) {
