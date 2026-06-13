@@ -5,7 +5,7 @@
 
 import store from './state/store.js';
 import Renderer from './canvas/renderer.js';
-import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName } from './canvas/shapes.js';
+import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName, getShapeBounds, getShapeEdgePoint } from './canvas/shapes.js';
 import { parseCommand, detectKeywords } from './parser/keyword.js';
 import { positionToCoords } from './canvas/grid.js';
 import contextManager from './parser/context.js';
@@ -25,6 +25,15 @@ class VoiceDrawApp {
     this.toast = null;
     this.isProcessing = false;
     this.previewTimeout = null;
+
+    // ── LLM 描述模式状态机 ──────────────────────────────────────
+    // 当用户说出 LLM 图形意图后，进入"描述模式"：
+    //   每句 isFinal 结果追加到缓冲，说"完成"时一次性发给 LLM 生成。
+    // 与 recorder.js 的"句子合并缓冲"层不同：那个缓冲在帧级别透明，
+    // 这个缓冲在指令级别，跨越多轮 isFinal。
+    this._llmSessionActive = false;   // 是否在描述模式
+    this._llmSessionBuffer = [];      // 已收集的句子片段
+    this._llmSessionId = null;        // 本轮会话 ID（传给后端保持历史）
   }
 
   /**
@@ -113,6 +122,14 @@ class VoiceDrawApp {
     }
 
     if (!isFinal) {
+      // 描述模式下：仅更新实时文字反馈，不触发预渲染
+      if (this._llmSessionActive) {
+        const preview = this._llmSessionBuffer.join('，');
+        const transcriptEl = document.getElementById('transcript');
+        if (transcriptEl) transcriptEl.textContent = `🎤 ${preview}${preview ? '，' : ''}${text}...`;
+        return;
+      }
+
       // 实时关键词检测 → 触发预渲染
       const keywords = detectKeywords(text);
       store.set('detectedKeywords', keywords);
@@ -128,6 +145,12 @@ class VoiceDrawApp {
         this._updatePreview(keywords);
       }
 
+      return;
+    }
+
+    // 描述模式：最终结果追加到缓冲，不走普通指令解析
+    if (this._llmSessionActive) {
+      this._handleSessionInput(text);
       return;
     }
 
@@ -276,23 +299,104 @@ class VoiceDrawApp {
 
   /**
    * 处理最终指令
+   * 流程：规则匹配 → 成功则直接执行；返回 unknown 时触发 LLM 兜底解析。
    */
   _processCommand(text) {
-    // 清除预览超时
     if (this.previewTimeout) clearTimeout(this.previewTimeout);
 
     const command = parseCommand(text);
 
-    if (!command) {
+    if (!command || command.type === 'unknown') {
+      // 规则匹配失败 → LLM 兜底（异步，有 ~1-2s 延迟但能覆盖边界情况）
       store.cancelPreview();
-      const clarification = contextManager.generateClarification(text);
-      voiceSynth.speak(clarification);
-      this.toast.warning(clarification, 4000);
+      this._llmFallbackParse(text);
       return;
     }
 
-    // 执行指令
     this._executeCommand(command, text);
+  }
+
+  /**
+   * LLM 兜底指令解析
+   * 规则引擎返回 unknown 时调用，让 LLM 用语义理解来识别意图。
+   * - 先显示"正在理解..."提示，避免用户以为系统没响应
+   * - LLM 成功：转换为内部 command 对象并执行
+   * - LLM 失败/返回 unknown：降级为普通"没有理解"提示
+   */
+  _llmFallbackParse(text) {
+    this.toast.show('🤔 正在理解指令...', 'info', 8000);
+
+    voiceRecorder.onLLMParseResult = (data) => {
+      voiceRecorder.onLLMParseResult = null;
+      voiceRecorder.onLLMParseError = null;
+
+      const command = this._llmResultToCommand(data);
+      if (command) {
+        console.log('[VoiceDraw] LLM fallback succeeded:', command);
+        this._executeCommand(command, text);
+      } else {
+        const clarification = contextManager.generateClarification(text);
+        voiceSynth.speak(clarification);
+        this.toast.warning(clarification, 4000);
+      }
+    };
+
+    voiceRecorder.onLLMParseError = (err) => {
+      voiceRecorder.onLLMParseResult = null;
+      voiceRecorder.onLLMParseError = null;
+      console.warn('[VoiceDraw] LLM fallback error:', err);
+      const clarification = contextManager.generateClarification(text);
+      voiceSynth.speak(clarification);
+      this.toast.warning(clarification, 4000);
+    };
+
+    voiceRecorder.sendLLMParse(text);
+  }
+
+  /**
+   * 将 LLM 兜底解析结果转换为内部 command 对象
+   * LLM 输出的 JSON 字段名与前端内部结构略有差异（targetId vs target），
+   * 此方法做适配映射。
+   * @param {object} r - LLM 返回的 JSON
+   * @returns {object|null} 内部 command，或 null（无法识别时）
+   */
+  _llmResultToCommand(r) {
+    if (!r || r.type === 'unknown') return null;
+
+    const target = (r.targetId != null) ? { type: 'id', value: r.targetId } : null;
+
+    switch (r.type) {
+      case 'draw':
+        return {
+          type: 'draw',
+          shape: r.shape || 'circle',
+          color: r.color || null,
+          position: r.position || null,     // { dx, dy } — 与 positionToCoords 兼容
+        };
+      case 'color':
+        if (!r.color) return null;
+        return { type: 'color', color: r.color, target };
+      case 'move':
+        if (r.dx == null && r.dy == null) return null;
+        return { type: 'move', dx: r.dx ?? 0, dy: r.dy ?? 0, distance: r.distance || 30, target };
+      case 'moveTo':
+        if (!r.position) return null;
+        return { type: 'moveTo', position: r.position, target };
+      case 'resize':
+        if (r.factor == null) return null;
+        return { type: 'resize', factor: r.factor, target };
+      case 'delete':
+        return { type: 'delete', target };
+      case 'select':
+        if (!target) return null;
+        return { type: 'select', target };
+      case 'undo':
+      case 'redo':
+      case 'clear':
+        return { type: r.type };
+      default:
+        return null;
+    }
   }
 
   /**
@@ -315,6 +419,18 @@ class VoiceDrawApp {
 
       case 'delete':
         result = this._execDelete(command);
+        break;
+
+      case 'connect':
+        result = this._execConnect(command);
+        break;
+
+      case 'addText':
+        result = this._execAddText(command);
+        break;
+
+      case 'modifyText':
+        result = this._execModifyText(command);
         break;
 
       case 'color':
@@ -431,7 +547,13 @@ class VoiceDrawApp {
       // 计算最终位置（命令优先，其次沿用预览位置）
       let finalX = preview.x;
       let finalY = preview.y;
-      if (command.position) {
+      if (command.relativeToId) {
+        const refObj = store.getObjectByNumber(command.relativeToId);
+        if (refObj) {
+          const pos = this._sideCoords(refObj, command.relativeSide);
+          finalX = pos.x; finalY = pos.y;
+        }
+      } else if (command.position) {
         const coords = positionToCoords(command.position, W, H);
         finalX = coords.x;
         finalY = coords.y;
@@ -450,7 +572,13 @@ class VoiceDrawApp {
 
     // 无预览 → 直接绘制
     let x = W / 2, y = H / 2;
-    if (command.position) {
+    if (command.relativeToId) {
+      const refObj = store.getObjectByNumber(command.relativeToId);
+      if (refObj) {
+        const pos = this._sideCoords(refObj, command.relativeSide);
+        x = pos.x; y = pos.y;
+      }
+    } else if (command.position) {
       const coords = positionToCoords(command.position, W, H);
       x = coords.x;
       y = coords.y;
@@ -556,12 +684,11 @@ class VoiceDrawApp {
     if (!obj) return null;
 
     if (command.dx !== undefined) {
-      // 方向移动（相对）
       const dist = command.distance || 30;
-      store.updateObject(obj.id, {
-        x: obj.x + command.dx * dist,
-        y: obj.y + command.dy * dist,
-      });
+      const dx = command.dx * dist;
+      const dy = command.dy * dist;
+      store.updateObject(obj.id, { x: obj.x + dx, y: obj.y + dy });
+      this._syncConnected(obj.id, dx, dy);
     }
 
     return obj;
@@ -571,10 +698,12 @@ class VoiceDrawApp {
     const obj = this._resolveTarget(command);
     if (!obj) return null;
 
-    // 绝对位置移动
     const { canvasWidth: W, canvasHeight: H } = store.state;
     const coords = positionToCoords(command.position, W, H);
+    const dx = coords.x - obj.x;
+    const dy = coords.y - obj.y;
     store.updateObject(obj.id, { x: coords.x, y: coords.y });
+    this._syncConnected(obj.id, dx, dy);
     return obj;
   }
 
@@ -664,19 +793,217 @@ class VoiceDrawApp {
     }
   }
 
+  // ========== 连线 / 文字标注 ==========
+
+  /**
+   * 把两个已有图形用直线连接
+   * "用线连接1号和3号" / "把2号连到4号"
+   * 连线端点停在形状边缘（不穿入中心），并记录 _fromId/_toId，
+   * 以便形状移动时自动更新连线位置。
+   */
+  _execConnect(command) {
+    const obj1 = store.getObjectByNumber(command.fromId);
+    const obj2 = store.getObjectByNumber(command.toId);
+    if (!obj1) { this.toast.warning(`未找到 ${command.fromId} 号对象`); return null; }
+    if (!obj2) { this.toast.warning(`未找到 ${command.toId} 号对象`); return null; }
+
+    const p1 = getShapeEdgePoint(obj1, obj2.x, obj2.y);
+    const p2 = getShapeEdgePoint(obj2, obj1.x, obj1.y);
+
+    const line = createShape('line', {
+      x: p1.x, y: p1.y,
+      x2: p2.x, y2: p2.y,
+      color: '#666666',
+      lineWidth: 2,
+      _fromId: obj1.id,
+      _toId: obj2.id,
+    });
+    return store.addObject(line);
+  }
+
+  /**
+   * 添加文字标注
+   * "在2号右边加文字：已审批" / "写上标题" / "标注完成"
+   */
+  _execAddText(command) {
+    const { canvasWidth: W, canvasHeight: H } = store.state;
+    let x = W / 2, y = H / 2;
+
+    let parentId = null;
+
+    if (command.refId) {
+      const ref = store.getObjectByNumber(command.refId);
+      if (!ref) { this.toast.warning(`未找到 ${command.refId} 号对象`); return null; }
+      if (command.side) {
+        // 有明确方位词 → 放在图形外侧，不绑定父对象
+        const pos = this._sideCoords(ref, command.side, 55);
+        x = pos.x; y = pos.y;
+      } else {
+        // 无方位词（默认）→ 文字居中于图形内部，绑定父对象随之移动
+        x = ref.x; y = ref.y;
+        parentId = ref.id;
+      }
+    } else if (command.position) {
+      const coords = positionToCoords(command.position, W, H);
+      x = coords.x; y = coords.y;
+    }
+
+    const textShape = createShape('text', {
+      x, y,
+      content: command.content,
+      fontSize: 16,
+      color: '#333333',
+      textAlign: 'center',
+      ...(parentId !== null ? { _parentId: parentId } : {}),
+    });
+    return store.addObject(textShape);
+  }
+
+  /**
+   * 修改文字对象的内容
+   * "把3号文字改成已完成"
+   */
+  _execModifyText(command) {
+    const obj = store.getObjectByNumber(command.refId);
+    if (!obj) { this.toast.warning(`未找到 ${command.refId} 号对象`); return null; }
+    if (obj.type !== 'text') {
+      this.toast.warning(`${command.refId} 号不是文字对象，无法修改内容`);
+      return null;
+    }
+    store.updateObject(obj.id, { content: command.content });
+    return obj;
+  }
+
+  /**
+   * 移动形状后，同步所有关联对象：
+   *   1. 有 _parentId === movedId 的子文字对象 → 随父对象平移相同位移
+   *   2. 有 _fromId 或 _toId === movedId 的连线 → 重新计算两端边缘交点
+   *
+   * 使用 updateObjectNoHistory，避免每个关联对象都产生独立历史快照。
+   * 撤销时，主对象的历史快照已包含所有关联对象的旧位置，可一次性还原。
+   *
+   * @param {number} movedId - 刚刚被移动的对象 ID
+   * @param {number} dx      - x 方向位移量（像素）
+   * @param {number} dy      - y 方向位移量（像素）
+   */
+  _syncConnected(movedId, dx, dy) {
+    const movedObj = store.getObjectById(movedId);
+    if (!movedObj) return;
+
+    for (const obj of store.state.objects) {
+      // 子文字：随父对象同步平移
+      if (obj._parentId === movedId) {
+        store.updateObjectNoHistory(obj.id, { x: obj.x + dx, y: obj.y + dy });
+      }
+
+      // 连线：重新计算两端边缘交点
+      if (obj._fromId || obj._toId) {
+        const isFrom = obj._fromId === movedId;
+        const isTo   = obj._toId   === movedId;
+        if (!isFrom && !isTo) continue;
+
+        const fromObj = isFrom ? movedObj : store.getObjectById(obj._fromId);
+        const toObj   = isTo   ? movedObj : store.getObjectById(obj._toId);
+        if (!fromObj || !toObj) continue;
+
+        const p1 = getShapeEdgePoint(fromObj, toObj.x, toObj.y);
+        const p2 = getShapeEdgePoint(toObj, fromObj.x, fromObj.y);
+        store.updateObjectNoHistory(obj.id, { x: p1.x, y: p1.y, x2: p2.x, y2: p2.y });
+      }
+    }
+  }
+
+  /**
+   * 根据参考对象和方位词计算目标坐标
+   * @param {object} refObj - 参考 shape 对象
+   * @param {string} side   - 'right'|'left'|'above'|'below'
+   * @param {number} gap    - 额外间距（默认 70px）
+   */
+  _sideCoords(refObj, side, gap = 70) {
+    const b = getShapeBounds(refObj);
+    switch (side) {
+      case 'left':  return { x: b.x - gap,            y: refObj.y };
+      case 'above': return { x: refObj.x,              y: b.y - gap };
+      case 'below': return { x: refObj.x,              y: b.y + b.h + gap };
+      default:      return { x: b.x + b.w + gap,       y: refObj.y }; // 'right'
+    }
+  }
+
   // ========== LLM 图形生成 ==========
 
   /**
    * 触发 LLM 绘图请求
-   * 1. 立即显示 "正在生成..." 提示
-   * 2. 通过 WebSocket 发到后端 → 通义千问解析
-   * 3. 结果回来后调用 _renderLLMResult 渲染到画布
+   * 改为"描述模式"入口：先把用户的初始描述收入缓冲，
+   * 等用户补充完细节并说"完成"后，再统一发给 LLM 生成。
+   * 这样避免了"一句话说不清"的情况，让复杂图形的描述体验更自然。
    */
   _execLLMDraw(command) {
     store.cancelPreview();
+    this._enterLLMSession(command.prompt);
+  }
+
+  // ========== LLM 描述模式状态机 ==========
+
+  /**
+   * 进入描述模式
+   * @param {string} initialPrompt - 触发 LLM 意图的第一句话
+   */
+  _enterLLMSession(initialPrompt) {
+    this._llmSessionActive = true;
+    this._llmSessionBuffer = [initialPrompt];
+    this._llmSessionId = `sid_${Date.now()}`;
+
+    voiceSynth.speak('好的，请继续补充细节，说完成开始生成');
+    this.toast.show('🎤 描述模式 — 请继续说细节，说"完成"开始生成，说"取消"退出', 'info', 60000);
+
+    const transcriptEl = document.getElementById('transcript');
+    if (transcriptEl) transcriptEl.textContent = `🎤 ${initialPrompt}`;
+  }
+
+  /**
+   * 接收描述模式下每一句 isFinal 结果
+   * - "完成/好了/结束/就这些/画吧" → 提交
+   * - "取消/算了/不画了" → 退出
+   * - 其余 → 追加到缓冲
+   */
+  _handleSessionInput(text) {
+    const t = text.trim();
+
+    if (/完成|好了|结束|就这些|就这样|开始画|开始绘制|画吧|行了|可以了/.test(t)) {
+      this._submitLLMSession();
+      return;
+    }
+
+    if (/取消|算了|不画了|退出|不要了/.test(t)) {
+      this._exitLLMSession(true);
+      return;
+    }
+
+    // 追加缓冲
+    this._llmSessionBuffer.push(t);
+    const count = this._llmSessionBuffer.length;
+    const joined = this._llmSessionBuffer.join('，');
+
+    const transcriptEl = document.getElementById('transcript');
+    if (transcriptEl) transcriptEl.textContent = `🎤 ${joined}`;
+
+    this.toast.show(
+      `📝 已记录 ${count} 句 — 继续描述，或说"完成"生成，"取消"退出`,
+      'info', 3000,
+    );
+  }
+
+  /**
+   * 提交描述缓冲 → 触发 LLM 生成
+   */
+  _submitLLMSession() {
+    const fullPrompt = this._llmSessionBuffer.join('，');
+    const sessionId = this._llmSessionId;
+
+    this._exitLLMSession(false);
+
     this.toast.show('⏳ 正在生成图形，请稍候...', 'info', 15000);
 
-    // 挂载一次性回调（防止多次触发）
     voiceRecorder.onLLMResult = (data) => {
       voiceRecorder.onLLMResult = null;
       voiceRecorder.onLLMError = null;
@@ -685,13 +1012,30 @@ class VoiceDrawApp {
     voiceRecorder.onLLMError = (err) => {
       voiceRecorder.onLLMResult = null;
       voiceRecorder.onLLMError = null;
-      const msg = `生成失败: ${err}`;
       console.error('[VoiceDraw] LLM error:', err);
       voiceSynth.speak('图形生成失败，请重试');
-      this.toast.error(msg, 4000);
+      this.toast.error(`生成失败: ${err}`, 4000);
     };
 
-    voiceRecorder.sendLLMDraw(command.prompt);
+    voiceRecorder.sendLLMDraw(fullPrompt, sessionId);
+  }
+
+  /**
+   * 退出描述模式（取消或正常完成后均调用）
+   * @param {boolean} cancelled - true 表示用户主动取消
+   */
+  _exitLLMSession(cancelled = false) {
+    this._llmSessionActive = false;
+    this._llmSessionBuffer = [];
+    this._llmSessionId = null;
+
+    const transcriptEl = document.getElementById('transcript');
+    if (transcriptEl) transcriptEl.textContent = '';
+
+    if (cancelled) {
+      voiceSynth.speak('已退出描述模式');
+      this.toast.info('已退出描述模式', 2000);
+    }
   }
 
   /**
@@ -733,9 +1077,13 @@ class VoiceDrawApp {
     const added = store.addBatch(shapes);
     const interactive = added.filter((o) => !o._system && o.type !== 'text');
     const typeName = typeNames[data.drawType] || '图形';
-    const msg = `✅ 已生成${typeName}，${interactive.length} 个可编辑对象`;
+
+    // 显示前 4 个可交互对象的 ID，明确告知用户可以用语音继续编辑
+    const idHint = interactive.length > 0
+      ? `（${interactive.slice(0, 4).map((o) => `${o.id}号`).join('、')}可直接语音改色、移动、删除）`
+      : '';
     voiceSynth.speak(`已生成${typeName}`);
-    this.toast.success(msg, 3000);
+    this.toast.success(`✅ 已生成${typeName}${idHint}`, 4000);
   }
 
   // ========== 辅助方法 ==========

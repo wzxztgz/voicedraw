@@ -151,10 +151,23 @@ class Store {
   }
 
   /**
-   * 更新图形对象
+   * 更新图形对象（推入历史）
    */
   updateObject(id, updates) {
     this.pushHistory();
+    const idx = this._state.objects.findIndex((o) => o.id === id);
+    if (idx !== -1) {
+      this._state.objects[idx] = { ...this._state.objects[idx], ...updates };
+      this.set('objects', [...this._state.objects]);
+    }
+  }
+
+  /**
+   * 静默更新图形对象（不推入历史）
+   * 用于移动时同步子文字和连线端点，避免产生多余历史快照。
+   * 撤销时，主对象的历史快照里已包含关联对象的旧位置，可一次性还原。
+   */
+  updateObjectNoHistory(id, updates) {
     const idx = this._state.objects.findIndex((o) => o.id === id);
     if (idx !== -1) {
       this._state.objects[idx] = { ...this._state.objects[idx], ...updates };

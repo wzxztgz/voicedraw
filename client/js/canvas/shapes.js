@@ -18,9 +18,10 @@ export function createShape(type, options = {}) {
     star:     { type: 'star',     x: 400, y: 300, size: 40, color: '#FFEAA7', lineWidth: 2 },
     ellipse:  { type: 'ellipse',  x: 400, y: 300, rx: 80, ry: 50, color: '#DDA0DD', lineWidth: 2 },
     // ── LLM 图形新增类型 ──────────────────────────────────
-    text:     { type: 'text',     x: 400, y: 300, content: '', fontSize: 14, color: '#333333', textAlign: 'center' },
-    arc:      { type: 'arc',      x: 400, y: 300, radius: 120, startAngle: 0, endAngle: Math.PI, color: '#45B7D1', lineWidth: 2 },
-    diamond:  { type: 'diamond',  x: 400, y: 300, width: 120, height: 60, color: '#FFEAA7', lineWidth: 2 },
+    text:         { type: 'text',         x: 400, y: 300, content: '', fontSize: 14, color: '#333333', textAlign: 'center' },
+    arc:          { type: 'arc',          x: 400, y: 300, radius: 120, startAngle: 0, endAngle: Math.PI, color: '#45B7D1', lineWidth: 2 },
+    diamond:      { type: 'diamond',      x: 400, y: 300, width: 120, height: 60, color: '#FFEAA7', lineWidth: 2 },
+    'rounded-rect': { type: 'rounded-rect', x: 400, y: 300, width: 140, height: 52, color: '#96CEB4', lineWidth: 2 },
   };
 
   const base = defaults[type] || defaults.circle;
@@ -87,6 +88,15 @@ export function drawShape(ctx, shape, isPreview = false) {
       break;
     case 'diamond':
       drawDiamond(ctx, shape);
+      break;
+    case 'curve':
+      drawCurve(ctx, shape);
+      break;
+    case 'rounded-rect':
+      drawRoundedRect(ctx, shape);
+      break;
+    case 'ortho':
+      drawOrtho(ctx, shape);
       break;
     default:
       drawCircle(ctx, shape);
@@ -165,9 +175,26 @@ function drawEllipse(ctx, shape) {
 }
 
 function drawText(ctx, shape) {
-  const { x, y, content, fontSize, color, textAlign } = shape;
+  const { x, y, content, fontSize, color, textAlign, _system } = shape;
+  const fs = fontSize || 14;
   ctx.save();
-  ctx.font = `${fontSize || 14}px "Noto Sans SC", sans-serif`;
+  ctx.font = `${fs}px "Noto Sans SC", sans-serif`;
+
+  // 用户创建的文字（非系统装饰）：加半透明圆角背景，让文字看起来像可编辑标签
+  if (!_system) {
+    const tw = ctx.measureText(content || '').width;
+    const th = fs + 8;
+    const bx = x - tw / 2 - 8;
+    const by = y - th / 2;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, tw + 16, th, 5);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150, 150, 150, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
   ctx.fillStyle = color || '#333333';
   ctx.textAlign = textAlign || 'center';
   ctx.textBaseline = 'middle';
@@ -203,6 +230,78 @@ function drawDiamond(ctx, shape) {
 }
 
 /**
+ * 贝塞尔曲线连线（思维导图专用）
+ * x/y 为起点，cx1/cy1、cx2/cy2 为控制点，x2/y2 为终点
+ */
+function drawCurve(ctx, shape) {
+  const { x, y, cx1, cy1, cx2, cy2, x2, y2, color, lineWidth } = shape;
+  ctx.save();
+  ctx.strokeStyle = color || '#aaa';
+  ctx.lineWidth   = lineWidth || 2;
+  ctx.lineCap     = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.bezierCurveTo(cx1, cy1, cx2, cy2, x2, y2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * 圆角矩形（流程图开始/结束节点，pill 形）
+ * 圆角半径 = 高度的一半，形成标准"跑道"形状
+ */
+function drawRoundedRect(ctx, shape) {
+  const { x, y, width, height, color } = shape;
+  const r = height / 2; // pill 形：圆角半径等于半高
+  ctx.beginPath();
+  ctx.roundRect(x - width / 2, y - height / 2, width, height, r);
+  ctx.fillStyle = color + '33';
+  ctx.fill();
+  ctx.stroke();
+}
+
+/**
+ * 直角折线连线（流程图专用）
+ * 路径：起点 → 竖直到中间 → 水平到目标 x → 竖直到终点
+ * 箭头以实心三角形绘制在终点处，方向跟随最后一段路径
+ */
+function drawOrtho(ctx, shape) {
+  const { x, y, x2, y2, color, lineWidth } = shape;
+  const midY = (y + y2) / 2;
+  const isStraight = Math.abs(x - x2) < 2;
+
+  ctx.save();
+  ctx.strokeStyle = color || '#888';
+  ctx.lineWidth   = lineWidth || 1.8;
+  ctx.lineJoin    = 'round';
+  ctx.lineCap     = 'round';
+
+  // 折线路径
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  if (isStraight) {
+    ctx.lineTo(x2, y2 - 9); // 直线，留出箭头空间
+  } else {
+    ctx.lineTo(x, midY);
+    ctx.lineTo(x2, midY);
+    ctx.lineTo(x2, y2 - 9);
+  }
+  ctx.stroke();
+
+  // 实心箭头三角形（始终指向 y2 方向）
+  const dir = y2 >= (isStraight ? y : midY) ? 1 : -1;
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - 6, y2 - 10 * dir);
+  ctx.lineTo(x2 + 6, y2 - 10 * dir);
+  ctx.closePath();
+  ctx.fillStyle = color || '#888';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+/**
  * 绘制选中高亮边框
  */
 export function drawSelection(ctx, shape) {
@@ -224,10 +323,8 @@ export function drawSelection(ctx, shape) {
  * - _nodeText → 节点文字已由 sysText 覆盖，不重复显示 ID
  */
 export function drawLabel(ctx, shape) {
-  // 系统装饰元素：不显示序号
+  // 系统装饰元素（坐标轴、流程图连线等）不显示序号
   if (shape._system) return;
-  // text 类型本身即为文字，不需要 ID 徽章
-  if (shape.type === 'text') return;
 
   ctx.save();
   const labelX = shape.x || (shape.x + shape.x2) / 2;
@@ -276,15 +373,71 @@ export function getShapeBounds(shape) {
       return { x: shape.x - shape.size, y: shape.y - shape.size, w: shape.size * 2, h: shape.size * 2 };
     case 'ellipse':
       return { x: shape.x - shape.rx, y: shape.y - shape.ry, w: shape.rx * 2, h: shape.ry * 2 };
-    case 'text':
-      return { x: shape.x - 60, y: shape.y - 10, w: 120, h: 20 };
+    case 'text': {
+      // 用字符数粗略估算宽度（中文字符约 fontSize × 1.1px）
+      const fs = shape.fontSize || 14;
+      const approxW = Math.max(40, (shape.content?.length || 2) * fs * 1.0) + 16;
+      const approxH = fs + 8;
+      return { x: shape.x - approxW / 2, y: shape.y - approxH / 2, w: approxW, h: approxH };
+    }
     case 'arc':
       return { x: shape.x - shape.radius, y: shape.y - shape.radius, w: shape.radius * 2, h: shape.radius * 2 };
     case 'diamond':
       return { x: shape.x - shape.width / 2, y: shape.y - shape.height / 2, w: shape.width, h: shape.height };
+    case 'rounded-rect':
+      return { x: shape.x - shape.width / 2, y: shape.y - shape.height / 2, w: shape.width, h: shape.height };
+    case 'ortho':
+      return { x: Math.min(shape.x, shape.x2), y: Math.min(shape.y, shape.y2), w: Math.abs(shape.x2 - shape.x), h: Math.abs(shape.y2 - shape.y) };
+    case 'curve':
+      return { x: Math.min(shape.x, shape.x2) - 10, y: Math.min(shape.y, shape.y2) - 10, w: Math.abs(shape.x2 - shape.x) + 20, h: Math.abs(shape.y2 - shape.y) + 20 };
     default:
       return { x: shape.x - 30, y: shape.y - 30, w: 60, h: 60 };
   }
+}
+
+/**
+ * 计算从 shape 中心出发、指向 (toX, toY) 的射线与 shape 边界的交点。
+ * 用于连线功能：让线段终止于形状轮廓，而不是穿入中心被遮住。
+ *
+ * @param {object} shape - 图形对象
+ * @param {number} toX   - 目标点 x
+ * @param {number} toY   - 目标点 y
+ * @returns {{ x: number, y: number }}
+ */
+export function getShapeEdgePoint(shape, toX, toY) {
+  const cx = shape.x;
+  const cy = shape.y;
+  const dx = toX - cx;
+  const dy = toY - cy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 1) return { x: cx, y: cy };
+
+  const cos = dx / dist;
+  const sin = dy / dist;
+
+  // 圆形：精确边缘
+  if (shape.type === 'circle') {
+    return { x: cx + cos * shape.radius, y: cy + sin * shape.radius };
+  }
+
+  // 椭圆形：参数方程求边缘
+  if (shape.type === 'ellipse') {
+    const { rx, ry } = shape;
+    const t = 1 / Math.sqrt((cos * cos) / (rx * rx) + (sin * sin) / (ry * ry));
+    return { x: cx + cos * t, y: cy + sin * t };
+  }
+
+  // 其余形状：用包围盒边缘近似（矩形、菱形、圆角矩形、三角形、星形等）
+  const bounds = getShapeBounds(shape);
+  const hw = bounds.w / 2;
+  const hh = bounds.h / 2;
+  const absCos = Math.abs(cos);
+  const absSin = Math.abs(sin);
+  const t = Math.min(
+    absCos > 0.0001 ? hw / absCos : Infinity,
+    absSin > 0.0001 ? hh / absSin : Infinity,
+  );
+  return { x: cx + cos * t, y: cy + sin * t };
 }
 
 /**
@@ -300,6 +453,7 @@ export const SHAPE_NAMES = {
   text: '文字',
   arc: '扇形',
   diamond: '菱形',
+  'rounded-rect': '圆角矩形',
 };
 
 /**

@@ -17,6 +17,15 @@ const HOMOPHONE_MAP = {
   '椭圆': '椭圆', '托圆': '椭圆',
   '撤小': '撤销', '撤锁': '撤销',
   '重座': '重做', '虫做': '重做',
+  // "清空"同音词（ASR 对 qīng kōng 的常见误识别）
+  '晴空': '清空', '星空': '清空', '天空': '清空',
+  // 颜色同音词
+  '绿色': '绿色', '录色': '绿色', '陆色': '绿色',
+  '红色': '红色', '洪色': '红色',
+  '黄色': '黄色', '皇色': '黄色',
+  // 操作动词同音词
+  '画个': '画一个', '花一个': '画一个', '花个': '画一个',
+  '撤回': '撤销',
 };
 
 /**
@@ -94,6 +103,18 @@ export function parseCommand(text) {
   const deleteResult = parseDelete(text);
   if (deleteResult) return deleteResult;
 
+  // 8.6 连线指令（"用线连接1号和3号" / "把2号连到4号"）
+  const connectResult = parseConnect(text);
+  if (connectResult) return connectResult;
+
+  // 8.7 添加文字标注（"在2号右边加文字：已审批" / "写上标题"）
+  const addTextResult = parseAddText(text);
+  if (addTextResult) return addTextResult;
+
+  // 8.8 修改文字内容（"把3号文字改成已完成"）—— 必须在颜色修改前，防止被拦截
+  const modifyTextResult = parseModifyText(text);
+  if (modifyTextResult) return modifyTextResult;
+
   // 9. 颜色修改指令
   const colorResult = parseColorChange(text);
   if (colorResult) return colorResult;
@@ -143,7 +164,15 @@ function parseDraw(text) {
   if (!shapeType) return null;
 
   // 必须包含明确的绘制动词才触发
-  const drawVerbs = ['画', '绘制', '绘画', '新建', '创建', '添加', '生成', '来个', '来一个', '整个', '整一个', '加个', '加一个', '做个', '做一个', '弄个', '弄一个'];
+  const drawVerbs = [
+    '画', '绘制', '绘画', '新建', '创建', '添加', '生成',
+    '来个', '来一个', '整个', '整一个', '加个', '加一个',
+    '做个', '做一个', '弄个', '弄一个',
+    // 口语化表达扩充
+    '搞个', '搞一个', '要个', '要一个', '给我画', '给我一个',
+    '帮我画', '帮我整', '帮我做', '搞出', '整出', '弄出',
+    '来一', '整一', '画出', '弄一', '搞一',
+  ];
   if (!drawVerbs.some((v) => text.includes(v))) return null;
 
   // 提取颜色
@@ -160,8 +189,19 @@ function parseDraw(text) {
   if (text.includes('大')) sizeModifier = 'large';
   else if (text.includes('小')) sizeModifier = 'small';
 
-  // 提取位置（如"在右上角画一个三角形"）
-  const position = parsePosition(text);
+  // 检测相对位置（"在1号右边画圆" / "在3号上方画矩形"）
+  // 优先级高于绝对位置
+  const relMatch = text.match(/在\s*(\d+|[一二三四五六七八九十]+)\s*号\s*(右边|左边|上面|下面|上方|下方|左方|右方|右侧|左侧|旁边)/);
+  let relativeToId = null;
+  let relativeSide = null;
+  if (relMatch) {
+    const numStr = relMatch[1];
+    relativeToId = parseInt(numStr) || chineseNumToInt(numStr);
+    relativeSide = parseSide(relMatch[2]);
+  }
+
+  // 绝对位置（"在右上角画圆"，无相对目标时使用）
+  const position = relativeToId ? null : parsePosition(text);
 
   return {
     type: 'draw',
@@ -169,6 +209,8 @@ function parseDraw(text) {
     color,
     sizeModifier,
     position,
+    relativeToId,
+    relativeSide,
   };
 }
 
@@ -224,7 +266,13 @@ function parseSelect(text) {
     const hasSelectVerb = text.includes('选中') || text.includes('选择') || text.includes('点击');
     // 含有操作动词（移/改/放大等）但无选中词 → 这是针对目标的操作指令，不是选中指令
     // 交给 parseMove / parseColorChange / parseSizeChange 处理（它们会通过 extractTarget 获取目标）
-    const hasActionVerb = ['移', '放大', '缩小', '变大', '变小', '改成', '变成', '换成', '调成', '删除', '删掉', '移除', '去掉', '擦掉', '擦除'].some((v) => text.includes(v));
+    const hasActionVerb = [
+      '移', '放大', '缩小', '变大', '变小', '改成', '变成', '换成', '调成',
+      '删除', '删掉', '移除', '去掉', '擦掉', '擦除',
+      '连接', '连线', '连到', '相连',          // 连线指令
+      '画', '绘制', '新建', '创建',             // 绘制（"在1号右边画圆"）
+      '加文字', '添加文字', '写上', '标注',     // 文字标注
+    ].some((v) => text.includes(v));
     if (hasActionVerb && !hasSelectVerb) {
       // 不拦截，让操作解析器处理
     } else {
@@ -273,12 +321,146 @@ function parseDelete(text) {
 }
 
 /**
+ * 提取文本中所有编号（阿拉伯数字 + 中文数字）
+ * 用于连线等需要两个 ID 的指令
+ */
+function extractAllNumbers(text) {
+  const results = [];
+  const seen = new Set();
+
+  const arabicRe = /(?:第\s*(\d+)|(\d+)\s*号)/g;
+  let m;
+  while ((m = arabicRe.exec(text)) !== null) {
+    const n = parseInt(m[1] ?? m[2]);
+    if (!seen.has(n)) { seen.add(n); results.push(n); }
+  }
+
+  const CN = '[一二三四五六七八九]';
+  const chRe = new RegExp(`(?:第\\s*(二十|十${CN}|${CN}十?|十)\\s*[个号]?|(二十|十${CN}|${CN}|十)\\s*号)`, 'g');
+  while ((m = chRe.exec(text)) !== null) {
+    const raw = m[1] ?? m[2];
+    const n = chineseNumToInt(raw);
+    if (n !== null && !seen.has(n)) { seen.add(n); results.push(n); }
+  }
+  return results;
+}
+
+/**
+ * 提取方位词（用于相对位置描述和文字标注定位）
+ */
+/**
+ * 提取方位词
+ * 无明确方位时返回 null（由调用方决定默认行为）
+ * parseDraw 的相对位置匹配在 regex 里已确保有方位词，不受影响
+ */
+function parseSide(text) {
+  if (text.includes('右边') || text.includes('右方') || text.includes('右侧') || text.includes('右面') || text.includes('旁边')) return 'right';
+  if (text.includes('左边') || text.includes('左方') || text.includes('左侧') || text.includes('左面')) return 'left';
+  if (text.includes('上方') || text.includes('上边') || text.includes('上侧')) return 'above';
+  if (text.includes('下面') || text.includes('下方') || text.includes('下边') || text.includes('下侧')) return 'below';
+  // 无明确方位 → 返回 null（文字标注默认居中到图形内部）
+  return null;
+}
+
+/**
+ * 解析连线指令
+ * "用线连接1号和3号" / "把2号连到4号" / "连接1号和2号"
+ */
+function parseConnect(text) {
+  const connectVerbs = ['连接', '连线', '连到', '相连', '连起来', '串联', '连上'];
+  if (!connectVerbs.some((v) => text.includes(v))) return null;
+
+  const nums = extractAllNumbers(text);
+  if (nums.length < 2) return null;
+
+  return { type: 'connect', fromId: nums[0], toId: nums[1] };
+}
+
+/**
+ * 解析添加文字标注指令
+ * "在2号右边加文字：已审批" / "写上标题" / "标注完成"
+ */
+function parseAddText(text) {
+  const textVerbs = ['加文字', '添加文字', '写上', '标注', '加标注', '加注', '添加注释', '加一段文字', '写文字'];
+  if (!textVerbs.some((v) => text.includes(v))) return null;
+
+  // 提取内容：冒号后的文字优先，否则取动词之后的内容
+  let content = '';
+  const colonMatch = text.match(/[：:]\s*(.+)$/);
+  if (colonMatch) {
+    content = colonMatch[1].trim();
+  } else {
+    for (const verb of textVerbs) {
+      const idx = text.indexOf(verb);
+      if (idx !== -1) {
+        content = text.slice(idx + verb.length).replace(/^[的说叫：:，,\s]+/, '').trim();
+        break;
+      }
+    }
+  }
+  if (!content) return null;
+
+  // 提取关联对象编号（冒号/内容前的编号）
+  const searchZone = colonMatch ? text.slice(0, text.lastIndexOf('：') === -1 ? text.lastIndexOf(':') : text.lastIndexOf('：')) : text;
+  const refId = extractNumber(searchZone);
+
+  // 提取方位
+  const side = parseSide(text);
+
+  // 绝对位置（无关联对象时使用）
+  const position = !refId ? parsePosition(text) : null;
+
+  return { type: 'addText', content, refId, side, position };
+}
+
+/**
+ * 解析文字内容修改指令
+ * "把3号文字改成已完成" / "修改3号的字：新内容" / "3号文字换成待审核"
+ * 要求：含"文字"/"字"关键词 + 目标编号 + 修改动词 + 新内容
+ */
+function parseModifyText(text) {
+  // 必须含"文字"或"字体"，与颜色改变指令区分
+  if (!text.includes('文字') && !text.includes('字体') && !text.includes('文本')) return null;
+
+  const modVerbs = ['改成', '变成', '换成', '改为', '变为', '替换成', '替换为', '修改成', '改'];
+  if (!modVerbs.some((v) => text.includes(v))) return null;
+
+  const refId = extractNumber(text);
+  if (!refId) return null;
+
+  // 提取新内容：冒号后优先，其次取动词之后
+  let content = '';
+  const colonMatch = text.match(/[：:]\s*(.+)$/);
+  if (colonMatch) {
+    content = colonMatch[1].trim();
+  } else {
+    for (const verb of modVerbs) {
+      const idx = text.indexOf(verb);
+      if (idx !== -1) {
+        content = text.slice(idx + verb.length).replace(/^[的说叫，,\s]+/, '').trim();
+        if (content) break;
+      }
+    }
+  }
+  if (!content) return null;
+
+  return { type: 'modifyText', refId, content };
+}
+
+/**
  * 解析颜色修改指令
  * 必须包含明确的修改动词，避免绘制/描述指令误触发
  */
 function parseColorChange(text) {
   // 必须包含颜色修改动词
-  const colorChangeVerbs = ['改成', '变成', '换成', '调成', '改为', '变为', '换为', '改颜色', '变颜色', '换颜色', '换个', '改个', '颜色改', '颜色变', '颜色换', '改色', '变色', '换色', '修改颜色', '调整颜色'];
+  const colorChangeVerbs = [
+    '改成', '变成', '换成', '调成', '改为', '变为', '换为',
+    '改颜色', '变颜色', '换颜色', '换个', '改个',
+    '颜色改', '颜色变', '颜色换',
+    '改色', '变色', '换色', '修改颜色', '调整颜色',
+    // 口语化扩充
+    '涂成', '刷成', '染成', '填成', '给它变', '弄成', '整成',
+  ];
   if (!colorChangeVerbs.some((v) => text.includes(v))) return null;
 
   let color = null;
@@ -302,9 +484,19 @@ function parseColorChange(text) {
  */
 function parseSizeChange(text) {
   // 放大类动词短语
-  const enlargeVerbs = ['放大', '变大', '调大', '改大', '大一点', '大一些', '大很多', '增大', '扩大', '大两倍', '大一倍'];
+  const enlargeVerbs = [
+    '放大', '变大', '调大', '改大', '大一点', '大一些', '大很多',
+    '增大', '扩大', '大两倍', '大一倍',
+    // 口语化扩充
+    '弄大', '整大', '搞大', '大点', '大些',
+  ];
   // 缩小类动词短语
-  const shrinkVerbs = ['缩小', '变小', '调小', '改小', '小一点', '小一些', '小很多', '减小', '压缩', '小一半', '小两倍'];
+  const shrinkVerbs = [
+    '缩小', '变小', '调小', '改小', '小一点', '小一些', '小很多',
+    '减小', '压缩', '小一半', '小两倍',
+    // 口语化扩充
+    '弄小', '整小', '搞小', '小点', '小些',
+  ];
 
   const isEnlarge = enlargeVerbs.some((v) => text.includes(v));
   const isShrink = shrinkVerbs.some((v) => text.includes(v));
@@ -429,7 +621,10 @@ function parseLLMIntent(text, original) {
     '思维导图', '脑图', '导图',
     '房子', '树', '花', '汽车', '地图',
   ];
-  const drawVerbs = ['画', '绘制', '生成', '创建', '新建', '做个', '来一个', '整一个', '帮我画'];
+  const drawVerbs = [
+    '画', '绘制', '生成', '创建', '新建', '做个', '来一个', '整一个', '帮我画',
+    '搞个', '搞一个', '要个', '要一个', '给我画', '帮我整', '帮我做',
+  ];
   const hasLLMShape = llmShapes.some((k) => text.includes(k));
   const hasDrawVerb = drawVerbs.some((v) => text.includes(v));
   if (hasLLMShape && hasDrawVerb) {
@@ -450,7 +645,11 @@ export function detectKeywords(text) {
   const keywords = { color: null, colorName: null, shape: null, size: null, position: null, hasDrawIntent: false };
 
   // 检测绘制意图（必须包含这些词才触发预览）
-  const drawIntentWords = ['画', '绘制', '绘画', '新建', '创建', '添加', '加一个', '来一个', '画一个', '来个', '整一个'];
+  const drawIntentWords = [
+    '画', '绘制', '绘画', '新建', '创建', '添加',
+    '加一个', '来一个', '画一个', '来个', '整一个',
+    '搞个', '搞一个', '要个', '要一个', '给我画', '给我一个', '帮我画',
+  ];
   keywords.hasDrawIntent = drawIntentWords.some((w) => text.includes(w));
 
   // 检测颜色

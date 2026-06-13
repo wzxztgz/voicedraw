@@ -90,6 +90,15 @@ class ContextManager {
       case 'delete': {
         return `已删除 ${result.id} 号`;
       }
+      case 'connect': {
+        return `已连接 ${command.fromId} 号和 ${command.toId} 号`;
+      }
+      case 'addText': {
+        return `已添加文字：${command.content}`;
+      }
+      case 'modifyText': {
+        return `已修改 ${command.refId} 号文字为：${command.content}`;
+      }
       case 'clear':
         return '画布已清除';
       case 'undo':

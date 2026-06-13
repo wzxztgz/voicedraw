@@ -12,6 +12,19 @@ function sysLine(x, y, x2, y2, color = '#aaa', lineWidth = 1.5) {
   return { type: 'line', x, y, x2, y2, color, lineWidth, _system: true };
 }
 
+/** 直角折线连线（流程图专用，含箭头） */
+function sysOrthoLine(x, y, x2, y2, color = '#888', lineWidth = 1.8) {
+  return { type: 'ortho', x, y, x2, y2, color, lineWidth, _system: true };
+}
+
+/**
+ * 贝塞尔曲线连线（思维导图专用）
+ * cx1/cy1、cx2/cy2 为两个控制点，渲染器用 bezierCurveTo 绘制
+ */
+function sysCurve(x, y, cx1, cy1, cx2, cy2, x2, y2, color = '#aaa', lineWidth = 2) {
+  return { type: 'curve', x, y, cx1, cy1, cx2, cy2, x2, y2, color, lineWidth, _system: true };
+}
+
 /** 把点限制在画布安全区内 */
 function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
 
@@ -61,26 +74,21 @@ export function renderFlowchart(config, W, H) {
     const to   = coordMap[e.to];
     if (!from || !to) return;
 
-    const x1 = from.x;
-    const y1 = from.y + nodeH / 2;
-    const x2 = to.x;
-    const y2 = to.y - nodeH / 2;
+    const x1   = from.x;
+    const y1   = from.y + nodeH / 2;
+    const x2   = to.x;
+    const y2   = to.y - nodeH / 2;
+    const midY = (y1 + y2) / 2;
 
-    shapes.push(sysLine(x1, y1, x2, y2, '#888', 1.8));
+    // 直角折线（内部包含箭头渲染）
+    shapes.push(sysOrthoLine(x1, y1, x2, y2));
 
-    // 箭头
-    const angle = Math.atan2(y2 - y1, x2 - x1);
-    const aLen  = 10;
-    shapes.push(sysLine(x2, y2,
-      x2 - aLen * Math.cos(angle - 0.38), y2 - aLen * Math.sin(angle - 0.38), '#888', 1.8));
-    shapes.push(sysLine(x2, y2,
-      x2 - aLen * Math.cos(angle + 0.38), y2 - aLen * Math.sin(angle + 0.38), '#888', 1.8));
-
-    // 边标签（避免遮住箭头，偏移到线段中间靠一侧）
+    // 边标签：放在水平段中点处，向右偏移避免遮线
     if (e.label) {
-      const mx = (x1 + x2) / 2 + (x1 === x2 ? 14 : 0);
-      const my = (y1 + y2) / 2;
-      shapes.push(sysText(mx, my, e.label, 11, '#666'));
+      const isStraight = Math.abs(x1 - x2) < 2;
+      const lx = isStraight ? x1 + 14 : (x1 + x2) / 2;
+      const ly = isStraight ? (y1 + y2) / 2 : midY - 10;
+      shapes.push(sysText(lx, ly, e.label, 11, '#666', isStraight ? 'left' : 'center'));
     }
   });
 
@@ -95,7 +103,8 @@ export function renderFlowchart(config, W, H) {
     const color = COLORS[shapeKey];
 
     if (shapeKey === 'oval') {
-      shapes.push({ type: 'ellipse', x, y, rx: nodeW / 2, ry: nodeH / 2, color, lineWidth: 2, _nodeText: n.text });
+      // 开始/结束节点：标准流程图规范使用圆角矩形（pill 形）
+      shapes.push({ type: 'rounded-rect', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text });
     } else if (shapeKey === 'diamond') {
       shapes.push({ type: 'diamond', x, y, width: nodeW, height: nodeH, color, lineWidth: 2, _nodeText: n.text });
     } else {
@@ -154,10 +163,18 @@ export function renderMindmap(config, W, H) {
 
     const color = BRANCH_COLORS[bi % BRANCH_COLORS.length];
 
-    // 连线：从根椭圆边缘出发
-    const ex = cx + cos * rootRx;
-    const ey = cy + sin * rootRy;
-    shapes.push(sysLine(ex, ey, bx, by, color, 2));
+    // 贝塞尔曲线：从根椭圆边缘 → 一级分支节点
+    // 控制点沿主方向延伸，让曲线从中心"流出"再弯向目标节点
+    const ex  = cx + cos * rootRx;
+    const ey  = cy + sin * rootRy;
+    const cpDist = r1 * 0.55; // 控制点距离
+    shapes.push(sysCurve(
+      ex, ey,
+      ex + cos * cpDist, ey + sin * cpDist,   // 控制点1：从根沿主方向延伸
+      bx - cos * cpDist * 0.4, by - sin * cpDist * 0.4, // 控制点2：靠近目标节点
+      bx, by,
+      color, 2.5,
+    ));
 
     // 一级节点
     shapes.push({
@@ -188,10 +205,17 @@ export function renderMindmap(config, W, H) {
 
       const cColor = CHILD_COLORS[bi % CHILD_COLORS.length];
 
-      // 连线：从一级节点边缘出发
-      const ex2 = bx + ccx * (branchW / 2);
-      const ey2 = by + ccy * (branchH / 2);
-      shapes.push(sysLine(ex2, ey2, cx2, cy2, cColor, 1.5));
+      // 贝塞尔曲线：从一级节点边缘 → 二级子节点
+      const ex2   = bx + ccx * (branchW / 2);
+      const ey2   = by + ccy * (branchH / 2);
+      const cp2Dist = r2 * 0.5;
+      shapes.push(sysCurve(
+        ex2, ey2,
+        ex2 + ccx * cp2Dist, ey2 + ccy * cp2Dist,
+        cx2 - ccx * cp2Dist * 0.3, cy2 - ccy * cp2Dist * 0.3,
+        cx2, cy2,
+        cColor, 1.8,
+      ));
 
       shapes.push({
         type: 'rect', x: cx2, y: cy2,
