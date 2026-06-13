@@ -181,26 +181,10 @@ function drawEllipse(ctx, shape) {
 }
 
 function drawText(ctx, shape) {
-  const { x, y, content, fontSize, color, textAlign, _system } = shape;
+  const { x, y, content, fontSize, color, textAlign } = shape;
   const fs = fontSize || 14;
   ctx.save();
   ctx.font = `${fs}px "Noto Sans SC", sans-serif`;
-
-  // 用户创建的文字（非系统装饰）：加半透明圆角背景，让文字看起来像可编辑标签
-  if (!_system) {
-    const tw = ctx.measureText(content || '').width;
-    const th = fs + 8;
-    const bx = x - tw / 2 - 8;
-    const by = y - th / 2;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
-    ctx.beginPath();
-    ctx.roundRect(bx, by, tw + 16, th, 5);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(150, 150, 150, 0.45)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
-
   ctx.fillStyle = color || '#333333';
   ctx.textAlign = textAlign || 'center';
   ctx.textBaseline = 'middle';
