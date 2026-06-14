@@ -6,6 +6,8 @@
 
 详细设计见 [`DESIGN.md`](./DESIGN.md)。
 
+**demo视频：**【题目二：AI语言绘图助手    声绘VoiceDraw-哔哩哔哩】 https://b23.tv/XvuNIKL
+
 ---
 
 ## 快速开始
