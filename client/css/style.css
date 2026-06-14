@@ -179,23 +179,31 @@ body {
   position: absolute;
   top: 16px;
   right: 16px;
-  width: 260px;
+  width: 280px;
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(10px);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   padding: 16px;
   opacity: 0;
-  transform: translateX(20px);
-  transition: all var(--transition);
+  transform: translateX(16px);
+  transition: opacity 0.42s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.42s cubic-bezier(0.4, 0, 0.2, 1);
   pointer-events: none;
   z-index: 5;
+  visibility: hidden;
 }
 
 .task-list.visible {
   opacity: 1;
   transform: translateX(0);
-  pointer-events: none;
+  visibility: visible;
+}
+
+.task-list.hiding {
+  opacity: 0;
+  transform: translateX(12px);
+  visibility: visible;
 }
 
 .task-header {
@@ -223,9 +231,20 @@ body {
 }
 
 .task-item.completed {
+  color: var(--primary-dark);
+  font-weight: 500;
+}
+
+.task-item.completed .task-text {
+  text-decoration: none;
+}
+
+.task-done-tag {
+  margin-left: auto;
+  font-size: 11px;
   color: var(--primary);
-  text-decoration: line-through;
-  opacity: 0.7;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .task-icon {
