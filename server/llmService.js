@@ -170,6 +170,9 @@ const PARSE_SYSTEM_PROMPT = `你是一个语音绘图指令解析器。将中文
 绝对位置：{"type":"draw","shape":"circle","color":"#FF6B6B","position":{"dx":0,"dy":0}}
 shape 取值：circle=圆形 rect=矩形 rounded-rect=圆角矩形 diamond=菱形 arrow-line=箭头线
 color 未提及时省略；position 未提及时省略；dx/dy 值域[-1,0,1]，左=-1右=1上=-1下=1
+箭头线连接两对象（从/由/自 N号指向M号）：{"type":"draw","shape":"arrow-line","fromId":4,"toId":1}
+箭头线方位起止：{"type":"draw","shape":"arrow-line","fromPosition":{"dx":-1,"dy":-1},"toPosition":{"dx":1,"dy":1}}
+fromId/toId 与 fromPosition/toPosition 可组合（一端编号一端方位）；勿用 connect 表示箭头
 若用户描述「在N号（右边/左边/上面/下面/旁边）画某形状」，使用相对位置格式（与 position 互斥）：
 {"type":"draw","shape":"rect","relativeToId":1,"relativeSide":"right"}
 relativeSide 取值：right=右 left=左 above=上 below=下
@@ -198,13 +201,31 @@ shape 支持：circle/rect/rounded-rect/diamond/line/triangle/star/ellipse/arrow
 添加文字标注：{"type":"addText","content":"文字内容","refId":1,"side":null}
 side 为方位 right/left/above/below，写在图形内部时为 null
 
+修改文字内容（图形内标签、流程图节点文字或独立文字对象）：
+{"type":"modifyText","refId":3,"content":"已完成"}
+与 color 区分：「把N号改成红色/蓝色」是 color；「把N号改成已完成」「把N号文字换成待审核」是 modifyText
+
+批量绘制：{"type":"batch-draw","shape":"circle","color":"#FF6B6B","count":3}
+count 为数量；color 未提及时省略
+
+批量改色：{"type":"batch-color","color":"#45B7D1","filterShape":"circle"}
+filterShape 省略或 null 表示改全部可交互对象；有形状词时填 circle/rect 等
+
+导出图片：{"type":"export"}
+
+打开帮助/查看可用指令：{"type":"help"}
+关闭帮助面板：{"type":"closeHelp"}
+与修改文字区分：「关闭帮助」「关掉说明」是 closeHelp；「关闭3号文字」不是 closeHelp
+
+编号字段 refId/targetId/fromId/toId 一律用阿拉伯数字（三号→3）
+
 【复合指令格式】（含多个步骤时必须返回 compound，禁止只返回第一步）：
 {"type":"compound","tasks":[
   {"type":"draw","shape":"circle","color":"#FF6B6B"},
   {"type":"draw","shape":"rect","color":"#45B7D1"},
   {"type":"color","color":"#96CEB4","targetId":1}
 ]}
-tasks 按句子顺序排列；支持混合类型：draw + color + connect + move + delete + shapeChange
+tasks 按句子顺序排列；支持混合类型：draw + color + connect + move + delete + shapeChange + addText + modifyText + batch-draw + batch-color
 示例：「先画圆，然后把1号改成红色」→ compound 含 draw + color(targetId:1)
 示例：「先画两个圆，然后连接1号和2号」→ compound 含两个 draw + connect
 相对位置子句用 relativeToId + relativeSide，不用九宫格 position

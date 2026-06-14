@@ -6,7 +6,7 @@
 import store from './state/store.js';
 import Renderer from './canvas/renderer.js';
 import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName, getShapeBounds, getShapeEdgePoint } from './canvas/shapes.js';
-import { parseCommandWithConfidence, parseCompoundRules, detectKeywords, hasComplexSignal } from './parser/keyword.js';
+import { parseCommandWithConfidence, parseCompoundRules, detectKeywords, hasComplexSignal, normalizeObjectId } from './parser/keyword.js';
 import { positionToCoords } from './canvas/grid.js';
 import contextManager from './parser/context.js';
 import voiceRecorder from './voice/recorder.js';
@@ -35,6 +35,7 @@ class VoiceDrawApp {
     this._llmSessionBuffer = [];      // 已收集的句子片段
     this._llmSessionId = null;        // 本轮会话 ID（传给后端保持历史）
     this._llmParseActive = false;     // 防止并发兜底解析请求导致回调覆盖
+    this._llmParsePending = null;     // 解析进行中时暂存最新一条指令
   }
 
   /**
@@ -77,20 +78,15 @@ class VoiceDrawApp {
    * 初始化语音服务
    */
   _initVoice() {
-    // 设置回调
     voiceRecorder.onResult = (text, isFinal) => this._onASRResult(text, isFinal);
-    voiceRecorder.onStatusChange = (status) => this._onVoiceStatusChange(status);
-
-    // 连接 WebSocket
-    voiceRecorder.connect();
-
-    // 连接后自动开始录音
     voiceRecorder.onStatusChange = (status) => {
       this._onVoiceStatusChange(status);
       if (status === 'asr-ready') {
         this._startRecording();
       }
     };
+
+    voiceRecorder.connect();
   }
 
   /**
@@ -206,6 +202,15 @@ class VoiceDrawApp {
       return { x: p1.x, y: p1.y, x2: p2.x, y2: p2.y, _fromId: obj1.id, _toId: obj2.id };
     }
 
+    const hasAnyRef = command.fromId != null || command.toId != null
+      || command.fromPosition || command.toPosition
+      || command.direction || command.position;
+    if (!hasAnyRef) {
+      this.toast.warning('请说明箭头起点和终点，如「由四号指向一号」');
+      return null;
+    }
+
+    const useDefaultOrigin = !!(command.direction || command.position);
     const resolvePoint = (id, pos, fallbackX, fallbackY) => {
       if (id != null) {
         const obj = store.getObjectByNumber(id);
@@ -222,7 +227,12 @@ class VoiceDrawApp {
       return null;
     };
 
-    const from = resolvePoint(command.fromId, command.fromPosition, W * 0.35, H / 2);
+    const from = resolvePoint(
+      command.fromId,
+      command.fromPosition,
+      useDefaultOrigin ? W * 0.35 : null,
+      useDefaultOrigin ? H / 2 : null,
+    );
     if (!from) return null;
     const to = resolvePoint(command.toId, command.toPosition, null, null);
 
@@ -458,17 +468,24 @@ class VoiceDrawApp {
    * - LLM 失败/返回 unknown：降级为普通"没有理解"提示
    */
   _llmFallbackParse(text) {
-    // 若已有一个兜底解析请求在飞，直接丢弃新请求，防止回调覆盖导致指令串台
-    if (this._llmParseActive) return;
+    if (this._llmParseActive) {
+      this._llmParsePending = text;
+      return;
+    }
     this._llmParseActive = true;
 
     this.toast.show('🤔 正在理解指令...', 'info', 8000);
 
-    voiceRecorder.onLLMParseResult = (data) => {
+    const finish = () => {
       this._llmParseActive = false;
       voiceRecorder.onLLMParseResult = null;
       voiceRecorder.onLLMParseError = null;
+      const pending = this._llmParsePending;
+      this._llmParsePending = null;
+      if (pending) this._llmFallbackParse(pending);
+    };
 
+    voiceRecorder.onLLMParseResult = (data) => {
       const command = this._llmResultToCommand(data);
       if (command) {
         console.log('[VoiceDraw] LLM fallback succeeded:', command);
@@ -478,16 +495,15 @@ class VoiceDrawApp {
         voiceSynth.speak(clarification);
         this.toast.warning(clarification, 4000);
       }
+      finish();
     };
 
     voiceRecorder.onLLMParseError = (err) => {
-      this._llmParseActive = false;
-      voiceRecorder.onLLMParseResult = null;
-      voiceRecorder.onLLMParseError = null;
       console.warn('[VoiceDraw] LLM fallback error:', err);
       const clarification = contextManager.generateClarification(text);
       voiceSynth.speak(clarification);
       this.toast.warning(clarification, 4000);
+      finish();
     };
 
     voiceRecorder.sendLLMParse(text);
@@ -503,7 +519,8 @@ class VoiceDrawApp {
   _llmResultToCommand(r) {
     if (!r || r.type === 'unknown') return null;
 
-    const target = (r.targetId != null) ? { type: 'id', value: r.targetId } : null;
+    const targetId = normalizeObjectId(r.targetId);
+    const target = (targetId != null) ? { type: 'id', value: targetId } : null;
 
     switch (r.type) {
       case 'draw':
@@ -511,10 +528,15 @@ class VoiceDrawApp {
           type: 'draw',
           shape: r.shape || 'circle',
           color: r.color || null,
-          position: r.position || null,         // { dx, dy } — 与 positionToCoords 兼容
-          relativeToId: r.relativeToId ?? null, // LLM 返回的相对位置目标编号
-          relativeSide: r.relativeSide ?? null, // right/left/above/below
+          position: r.position || null,
+          relativeToId: normalizeObjectId(r.relativeToId),
+          relativeSide: r.relativeSide ?? null,
           sizeModifier: r.sizeModifier ?? null,
+          fromId: normalizeObjectId(r.fromId),
+          toId: normalizeObjectId(r.toId),
+          fromPosition: r.fromPosition ?? null,
+          toPosition: r.toPosition ?? null,
+          direction: r.direction ?? null,
         };
       case 'color':
         if (!r.color) return null;
@@ -533,17 +555,42 @@ class VoiceDrawApp {
       case 'select':
         if (!target) return null;
         return { type: 'select', target };
-      case 'connect':
-        if (r.fromId == null || r.toId == null) return null;
-        return { type: 'connect', fromId: r.fromId, toId: r.toId };
+      case 'connect': {
+        const fromId = normalizeObjectId(r.fromId);
+        const toId = normalizeObjectId(r.toId);
+        if (fromId == null || toId == null) return null;
+        return { type: 'connect', fromId, toId };
+      }
       case 'addText':
         if (!r.content) return null;
         return {
           type: 'addText',
           content: r.content,
-          refId: r.refId ?? null,
+          refId: normalizeObjectId(r.refId),
           side: r.side ?? null,
         };
+      case 'modifyText': {
+        const refId = normalizeObjectId(r.refId);
+        if (!r.content || refId == null) return null;
+        return { type: 'modifyText', refId, content: r.content };
+      }
+      case 'batch-draw': {
+        const count = typeof r.count === 'number' ? r.count : parseInt(r.count, 10);
+        if (!r.shape || !count || Number.isNaN(count)) return null;
+        return { type: 'batch-draw', shape: r.shape, color: r.color || null, count };
+      }
+      case 'batch-color':
+        if (!r.color) return null;
+        return {
+          type: 'batch-color',
+          color: r.color,
+          filterShape: r.filterShape || null,
+        };
+      case 'export':
+        return { type: 'export' };
+      case 'help':
+      case 'closeHelp':
+        return { type: r.type };
       case 'shapeChange':
         if (!r.shape) return null;
         return { type: 'shapeChange', shape: r.shape, color: r.color || null, target };
@@ -1250,13 +1297,17 @@ class VoiceDrawApp {
         store.updateObjectNoHistory(obj.id, { x: p1.x, y: p1.y, x2: p2.x, y2: p2.y });
       }
 
-      // LLM 图结构边（ortho/curve）：平移对应端点，让折线跟随节点移动
-      // 一根线可能同时是 from 和 to（自环），分别处理
+      // LLM 图结构边（ortho/curve）及边标签文字
       if (obj._edgeFromId === movedId || obj._edgeToId === movedId) {
+        // 边标签是 text，只有 x/y；任一端点节点移动都平移标签
+        if (obj.type === 'text') {
+          store.updateObjectNoHistory(obj.id, { x: obj.x + dx, y: obj.y + dy });
+          continue;
+        }
+
         const upd = {};
         if (obj._edgeFromId === movedId) { upd.x  = obj.x  + dx; upd.y  = obj.y  + dy; }
         if (obj._edgeToId   === movedId) { upd.x2 = obj.x2 + dx; upd.y2 = obj.y2 + dy; }
-        // curve 还需平移控制点，保持曲线形态
         if (obj.type === 'curve') {
           if (obj._edgeFromId === movedId) { upd.cx1 = obj.cx1 + dx; upd.cy1 = obj.cy1 + dy; }
           if (obj._edgeToId   === movedId) { upd.cx2 = obj.cx2 + dx; upd.cy2 = obj.cy2 + dy; }
@@ -1525,15 +1576,36 @@ class VoiceDrawApp {
 
     switch (command.type) {
       case 'draw':
-        return `画一个${colorName}${shapeName}`;
+        if (command.shape === 'arrow-line' && command.fromId != null && command.toId != null) {
+          return `画箭头 ${command.fromId}号→${command.toId}号`;
+        }
+        return `画一个${colorName}${shapeName || '图形'}`;
       case 'color':
         return `修改颜色为${colorName || command.colorName}`;
       case 'resize':
         return command.factor > 1 ? '放大对象' : '缩小对象';
       case 'move':
         return '移动对象';
+      case 'moveTo':
+        return '移动到指定位置';
       case 'select':
-        return '选中对象';
+        return command.target ? `选中 ${command.target.value} 号` : '选中对象';
+      case 'delete':
+        return command.target ? `删除 ${command.target.value} 号` : '删除对象';
+      case 'connect':
+        return `连接 ${command.fromId}号和${command.toId}号`;
+      case 'addText':
+        return `添加文字：${command.content}`;
+      case 'modifyText':
+        return command.content
+          ? `修改 ${command.refId} 号文字为「${command.content}」`
+          : `修改 ${command.refId} 号文字`;
+      case 'shapeChange':
+        return `换成${SHAPE_NAMES[command.shape] || command.shape}`;
+      case 'batch-draw':
+        return `画 ${command.count} 个${SHAPE_NAMES[command.shape] || command.shape}`;
+      case 'batch-color':
+        return `批量改色为${colorName}`;
       default:
         return '执行操作';
     }

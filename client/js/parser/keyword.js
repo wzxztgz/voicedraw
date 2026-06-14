@@ -93,17 +93,13 @@ function detectShapeLabel(text) {
   return null;
 }
 
-/** 解析「从 A 指向 B」端点（编号或九宫格方位） */
-function parseDirectedEndpoints(text) {
-  const m = text.match(/从\s*(.+?)\s*(?:指向|指到)\s*(.+)/);
-  const m2 = !m && /画|绘制|一条线|一根线|箭头/.test(text)
-    ? text.match(/从\s*(.+?)\s*到\s*(.+)/)
-    : null;
-  const seg = m || m2;
-  if (!seg) return null;
+/** 起点连接词：从 / 由 / 自（「自…起」中的起在端点串解析时剥离） */
+const FROM_PREFIX = '(?:从|由|自)';
 
-  const fromStr = seg[1].trim();
-  let toStr = seg[2].trim().replace(/(?:的)?(?:箭头线|箭头直线|箭头|线)\s*$/, '');
+/** 将起止描述串解析为编号或九宫格方位 */
+function _resolveEndpointStrings(fromStr, toStr) {
+  fromStr = fromStr.trim().replace(/起$/, '');
+  toStr = toStr.trim().replace(/(?:的)?(?:箭头线|箭头直线|箭头|线)\s*$/, '');
 
   let fromId = null;
   let toId = null;
@@ -124,6 +120,31 @@ function parseDirectedEndpoints(text) {
   return null;
 }
 
+/**
+ * 解析「从/由/自 A 指向 B」端点（编号或九宫格方位）
+ * 模式 A：从/由/自 + 指向/指到
+ * 模式 B：从/由/自 + 到/至（需含画/箭头语境）
+ * 模式 C：N号 指向 M号（允许前有 有/将/把，如「有四号指向一号」）
+ */
+function parseDirectedEndpoints(text) {
+  const toWords = '(?:指向|指到|指往)';
+
+  const m = text.match(new RegExp(`${FROM_PREFIX}\\s*(.+?)\\s*${toWords}\\s*(.+)`));
+  if (m) return _resolveEndpointStrings(m[1], m[2]);
+
+  if (/画|绘制|一条线|一根线|箭头/.test(text)) {
+    const m2 = text.match(new RegExp(`${FROM_PREFIX}\\s*(.+?)\\s*(?:到|至)\\s*(.+)`));
+    if (m2) return _resolveEndpointStrings(m2[1], m2[2]);
+  }
+
+  const m3 = text.match(
+    /(?:有|将|把)?\s*(\d+|[一二三四五六七八九十]+)\s*号?\s*(?:指向|指到|指往)\s*(\d+|[一二三四五六七八九十]+)\s*号?/,
+  );
+  if (m3) return _resolveEndpointStrings(m3[1], m3[2]);
+
+  return null;
+}
+
 /** 解析箭头朝向（向右/朝上等） */
 function parseArrowDirection(text) {
   for (const [dir, vec] of Object.entries(DIRECTION_MAP)) {
@@ -140,7 +161,7 @@ function parseArrowDirection(text) {
 
 /**
  * 解析箭头线绘制（须在普通直线之前）
- * 触发：画一个箭头 / 带箭头的线 / 从A指向B / 画一条从左上角指向右下角的线
+ * 触发：画一个箭头 / 带箭头的线 / 从·由·自 A 指向 B / 有四号指向一号
  */
 function parseArrowDraw(text) {
   const hasArrowWord = /箭头/.test(text) || (/带箭头|有箭头/.test(text) && /线|直线/.test(text));
@@ -230,19 +251,22 @@ function correctHomophones(text) {
  * 返回 true 时上层会主动路由到 LLM，而不是等规则引擎误判成单条指令。
  *
  * 触发条件（满足任意一条）：
- *   1. 含复合分隔词（先/然后/接着/最后/并且/还要/之后）
- *   2. 句中出现 ≥2 个绘制动词（如"画…画…"）
- *   3. 句中出现 ≥2 种不同形状词（如同时含"圆"和"矩形"）
- *   4. 长句（>20字）且含至少一个绘制动词（口语化多步指令）
+ *   1. 含复合分隔词且拆出 ≥2 段子句（「先画圆」仅 1 段不算）
+ *   2. 非句首的「再」（如「画圆再画矩形」）
+ *   3. 句中出现 ≥2 个绘制动词
+ *   4. 句中出现 ≥2 种不同形状词
  *
  * 不触发：「再画一个圆」（以"再"开头的微调/续画），交给 parseRefine/parseDraw 处理。
  */
 export function hasComplexSignal(text) {
-  // 条件1：分隔词
-  const separators = ['先', '然后', '接着', '最后', '并且', '还要', '之后', '随后', '紧接着', '接下来'];
-  // "再"只在非句首时才算分隔词，以免误判"再大一点"
-  if (separators.some((s) => text.includes(s))) return true;
-  if (!text.startsWith('再') && text.includes('再')) return true;
+  const normalized = correctHomophones(text.trim().toLowerCase());
+
+  // 条件1：含分隔词且拆出 ≥2 段（「先画一个圆」仅 1 段 → 单条指令，不走 LLM）
+  if (hasCompoundSeparator(normalized)) {
+    if (splitCompoundParts(normalized).length >= 2) return true;
+  } else if (!normalized.startsWith('再') && normalized.includes('再')) {
+    return true;
+  }
 
   // 条件2：≥2 个绘制动词
   const drawVerbs = ['画', '绘制', '创建', '新建', '添加', '生成'];
@@ -284,8 +308,10 @@ export function parseCommand(text) {
   const llmResult = parseLLMIntent(text, original);
   if (llmResult) return llmResult;
 
-  // 0.5 关闭帮助面板（须在 help 检测之前，避免「关闭帮助」误触发打开）
-  if (text.includes('关闭') || text.includes('关掉') || text === '关') {
+  // 0.5 关闭帮助面板（固定句式，避免「关闭3号文字」误触发）
+  if (/^关闭(帮助|说明|面板|帮助面板)/.test(text)
+    || /^关掉(帮助|说明|面板)/.test(text)
+    || text === '关帮助') {
     return { type: 'closeHelp' };
   }
 
@@ -294,13 +320,13 @@ export function parseCommand(text) {
     return { type: 'help' };
   }
 
-  // 2. 确认指令
-  if (text === '确认' || text === '好的' || text === '对' || text === '是的' || text === '没错') {
+  // 2. 确认指令（允许口语尾缀：确认吧、好的啊）
+  if (/^确认/.test(text) || /^好的/.test(text) || text === '对' || /^是的/.test(text) || text === '没错') {
     return { type: 'confirm' };
   }
 
   // 3. 取消指令
-  if (text === '取消' || text === '不要' || text === '算了' || text === '不对') {
+  if (/^取消/.test(text) || text === '不要' || text === '算了' || text === '不对') {
     return { type: 'cancel' };
   }
 
@@ -487,6 +513,19 @@ function chineseNumToInt(str) {
   return map[str] ?? null;
 }
 
+/** LLM / 外部 JSON 中的编号归一化（阿拉伯数字或中文数字 → number） */
+export function normalizeObjectId(value) {
+  if (value == null) return null;
+  if (typeof value === 'number' && !Number.isNaN(value)) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    const n = parseInt(trimmed, 10);
+    if (!Number.isNaN(n)) return n;
+    return chineseNumToInt(trimmed);
+  }
+  return null;
+}
+
 /**
  * 从文本中提取编号（支持阿拉伯数字和中文数字）
  * 匹配：3号 / 三号 / 第3个 / 第三个
@@ -555,6 +594,9 @@ function parseSelect(text) {
       '将', '把',
     ].some((v) => text.includes(v));
     if (hasActionVerb) return null;
+
+    // ⑤ 无选中动词时，仅允许极短「N号」句式，长句交 LLM
+    if (!/^第?\s*[\d一二三四五六七八九十]+\s*号$/.test(text.trim())) return null;
   }
   // ──────────────────────────────────────────────────────────────
 
@@ -627,6 +669,18 @@ function parseConnect(text) {
   const nums = extractAllNumbers(text);
   if (nums.length < 2) return null;
 
+  // 「把2号连到4号」「从1号连到3号」— 按语义确定方向
+  const directed = text.match(
+    /(?:从\s*)?(\d+|[一二三四五六七八九十]+)\s*号?\s*连到\s*(\d+|[一二三四五六七八九十]+)\s*号?/,
+  );
+  if (directed) {
+    const fromId = extractNumber(`${directed[1]}号`);
+    const toId = extractNumber(`${directed[2]}号`);
+    if (fromId != null && toId != null) {
+      return { type: 'connect', fromId, toId };
+    }
+  }
+
   return { type: 'connect', fromId: nums[0], toId: nums[1] };
 }
 
@@ -669,18 +723,19 @@ function parseAddText(text) {
 
 /**
  * 解析文字内容修改指令
- * "把3号文字改成已完成" / "修改3号的字：新内容" / "3号文字换成待审核"
- * 要求：含"文字"/"字"关键词 + 目标编号 + 修改动词 + 新内容
+ * "把3号文字改成已完成" / "3号文字换成待审核" → 高置信规则执行
+ * "把3号改成已完成"（无「文字」词）→ 规则可匹配但低置信，交 LLM 消歧
+ * 含颜色词或形状词时不匹配（如「把3号文字改成红色」→ parseColorChange）
  */
 function parseModifyText(text) {
-  // 必须含"文字"或"字体"，与颜色改变指令区分
-  if (!text.includes('文字') && !text.includes('字体') && !text.includes('文本')) return null;
-
-  const modVerbs = ['改成', '变成', '换成', '改为', '变为', '替换成', '替换为', '修改成', '改'];
+  const modVerbs = ['改成', '变成', '换成', '改为', '变为', '替换成', '替换为', '修改成'];
   if (!modVerbs.some((v) => text.includes(v))) return null;
 
   const refId = extractNumber(text);
   if (!refId) return null;
+
+  const hasTextKeyword = text.includes('文字') || text.includes('字体') || text.includes('文本');
+  const hasColorWord = Object.keys(COLOR_MAP).some((name) => text.includes(name));
 
   // 提取新内容：冒号后优先，其次取动词之后
   let content = '';
@@ -698,7 +753,16 @@ function parseModifyText(text) {
   }
   if (!content) return null;
 
-  return { type: 'modifyText', refId, content };
+  // 含颜色词 → 改色意图（如「把3号文字改成红色」），交给 parseColorChange
+  if (hasColorWord) return null;
+
+  // 含严格形状词 → 换形状意图（如「把1号文字改成圆形」），交给 parseShapeChange
+  if (resolveShapeTypeStrict(text) !== null) return null;
+
+  // 无「文字」词时：须含把/将等操作语气，否则交 LLM 消歧
+  if (!hasTextKeyword && !/把|将/.test(text)) return null;
+
+  return { type: 'modifyText', refId, content, explicitText: hasTextKeyword };
 }
 
 /**
@@ -891,7 +955,7 @@ function parseBatch(text) {
   }
 
   // ── 批量颜色 ──────────────────────────────
-  const batchColorWords = ['所有', '全部', '全都', '都', '每个', '每一个'];
+  const batchColorWords = ['所有', '全部', '全都', '每个', '每一个'];
   const hasBatchWord = batchColorWords.some((w) => text.includes(w));
   if (!hasBatchWord) return null;
 
@@ -1050,53 +1114,77 @@ function parseLLMIntent(text, original) {
 /**
  * 置信度评估（仅供 parseCommandWithConfidence 内部调用）
  *
- * 规则：
- *   'high' → 规则直接执行，不走 LLM，<5ms，0 token
- *   'low'  → 转交 LLM 兜底解析
- *
- * 只对容易误判的 select / draw / color / resize 做额外信号校验；
- * 其他类型有明确触发词，匹配即高置信。
+ * 策略：默认 low（交 LLM）；仅无歧义模板才 high。
+ * 误走 LLM 可接受，规则高置信误执行不可接受。
  */
 function _assessConfidence(command, signals) {
   if (!command || command.type === 'unknown') return 'low';
 
+  const hasTarget = command.target != null;
+  const hasSelection = store.getSelected() != null;
+  const hasObjectContext = hasTarget || hasSelection;
+
   switch (command.type) {
     case 'llm-draw':
-      return 'high'; // parseLLMIntent 明确触发，直接信任
+      return 'high';
 
     case 'select':
-      // parseSelect 已加三重否定守卫，能走到这里置信度足够
       return 'high';
 
     case 'draw':
-      if (command.shape === 'arrow-line') return 'high';
+      if (command.shape === 'arrow-line') {
+        if (command.fromId != null && command.toId != null) return 'high';
+        if (command.fromPosition && command.toPosition) return 'high';
+        if (command.direction) return 'high';
+        if (command.fromId != null || command.toId != null) return 'high';
+        if (command.fromPosition || command.toPosition) return 'high';
+        return 'low';
+      }
       if (command.relativeToId && command.relativeSide) return 'high';
-      // 标准绘制：严格形状解析 + 绘制动词同时命中才算高置信
       if (signals.hasDrawVerb && signals.hasShapeHint) return 'high';
       return 'low';
 
     case 'color':
-      // 含绘制动词时，可能是「画一个红色圆」被误分类
       if (signals.hasDrawVerb) return 'low';
+      if (!hasObjectContext) return 'low';
       return 'high';
 
     case 'resize':
-      // parseSizeChange 已有 hasDrawVerb 前置守卫，这里作双保险
       if (signals.hasDrawVerb) return 'low';
+      if (!hasObjectContext) return 'low';
       return 'high';
 
-    // 以下类型有明确触发词，匹配即高置信
+    case 'modifyText':
+      return command.explicitText ? 'high' : 'low';
+
     case 'move':
     case 'moveTo':
+      if (!hasObjectContext) return 'low';
+      return 'high';
+
     case 'delete':
+      return 'high';
+
     case 'connect':
+      return 'high';
+
     case 'addText':
-    case 'modifyText':
+      return 'high';
+
     case 'shapeChange':
+      if (!hasObjectContext) return 'low';
+      return 'high';
+
     case 'batch-draw':
     case 'batch-color':
+      return 'high';
+
     case 'compound':
+      return 'low';
+
     case 'refine':
+      return store.state.lastAction ? 'high' : 'low';
+
     case 'undo':
     case 'redo':
     case 'clear':
@@ -1162,7 +1250,8 @@ export function detectKeywords(text) {
     '一条线', '一根线', '画一条', '画一根', '箭头',
   ];
   keywords.hasDrawIntent = drawIntentWords.some((w) => text.includes(w))
-    || /从.+指向/.test(text);
+    || /(?:从|由|自).+指向/.test(text)
+    || /(?:有|将|把)?\s*[\d一二三四五六七八九十]+\s*号?\s*指向/.test(text);
 
   for (const [name, hex] of Object.entries(COLOR_MAP)) {
     if (text.includes(name)) {
