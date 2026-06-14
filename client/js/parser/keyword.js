@@ -6,6 +6,7 @@
 import store from '../state/store.js';
 import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName } from '../canvas/shapes.js';
 import { parseMovement, parsePosition, DIRECTION_MAP } from '../canvas/grid.js';
+import { sanitizeVoiceText } from './commandGuard.js';
 
 // ─── 形状关键词（长词优先，全局共用）────────────────────────
 const SHAPE_KEYWORDS = [
@@ -245,6 +246,43 @@ function correctHomophones(text) {
  * @param {string} text - 语音识别文本
  * @returns {object|null} 解析后的指令
  */
+/** 操作动词短语（长词优先匹配，供 hasComplexSignal 统计） */
+const ACTION_VERB_PHRASES = [
+  '添加注释', '加一段文字', '添加文字', '加文字', '写文字', '加标注', '标注', '写上', '加注',
+  '连起来', '连接', '连线', '连到', '相连', '串联', '连上',
+  '绘制', '绘画', '创建', '新建', '生成', '来一个', '画',
+  '替换成', '替换为', '修改成', '变成', '换成', '改为', '变为', '改成', '调成', '涂成', '刷成', '染成', '弄成', '整成', '换为',
+  '删除', '删掉', '移除', '去掉', '擦掉', '擦除',
+  '移动到', '移到', '移动',
+  '大两倍', '大一倍', '小两倍', '小一半', '大一点', '小一点', '大一些', '小一些', '大很多', '小很多',
+  '放大', '缩小', '变大', '变小', '调大', '调小', '改大', '改小', '增大', '扩大', '减小', '压缩',
+  '弄大', '整大', '搞大', '弄小', '整小', '搞小',
+  '选中', '选择', '点击',
+];
+const ACTION_VERBS_SORTED = [...ACTION_VERB_PHRASES].sort((a, b) => b.length - a.length);
+
+/** 统计句中操作动词出现次数（长词优先、掩码避免「绘制」被拆成两次「画」） */
+function countActionVerbs(text) {
+  let work = text;
+  let count = 0;
+  while (true) {
+    let bestIdx = -1;
+    let bestVerb = null;
+    for (const verb of ACTION_VERBS_SORTED) {
+      const idx = work.indexOf(verb);
+      if (idx === -1) continue;
+      if (bestIdx === -1 || idx < bestIdx || (idx === bestIdx && verb.length > bestVerb.length)) {
+        bestIdx = idx;
+        bestVerb = verb;
+      }
+    }
+    if (bestIdx === -1) break;
+    count++;
+    work = work.slice(0, bestIdx) + ' '.repeat(bestVerb.length) + work.slice(bestIdx + bestVerb.length);
+  }
+  return count;
+}
+
 /**
  * 复杂信号检测
  * 判断一句话在结构上是否属于「多动作复合指令」。
@@ -253,13 +291,16 @@ function correctHomophones(text) {
  * 触发条件（满足任意一条）：
  *   1. 含复合分隔词且拆出 ≥2 段子句（「先画圆」仅 1 段不算）
  *   2. 非句首的「再」（如「画圆再画矩形」）
- *   3. 句中出现 ≥2 个绘制动词
+ *   3. 句中出现 ≥2 个操作动词（绘制/连接/改色/移动/删除等）
  *   4. 句中出现 ≥2 种不同形状词
  *
  * 不触发：「再画一个圆」（以"再"开头的微调/续画），交给 parseRefine/parseDraw 处理。
  */
 export function hasComplexSignal(text) {
-  const normalized = correctHomophones(text.trim().toLowerCase());
+  const sanitized = sanitizeVoiceText(text);
+  if (!sanitized) return false;
+
+  const normalized = correctHomophones(sanitized.trim().toLowerCase());
 
   // 条件1：含分隔词且拆出 ≥2 段（「先画一个圆」仅 1 段 → 单条指令，不走 LLM）
   if (hasCompoundSeparator(normalized)) {
@@ -268,13 +309,11 @@ export function hasComplexSignal(text) {
     return true;
   }
 
-  // 条件2：≥2 个绘制动词
-  const drawVerbs = ['画', '绘制', '创建', '新建', '添加', '生成'];
-  const drawVerbCount = drawVerbs.reduce((n, v) => n + (text.split(v).length - 1), 0);
-  if (drawVerbCount >= 2) return true;
+  // 条件2：≥2 个操作动词（不限绘制动词，覆盖「连接 + 改文字」等跨动作复合句）
+  if (countActionVerbs(sanitized) >= 2) return true;
 
   // 条件3：≥2 种不同形状词（长词先掩码，避免「圆角矩形」误判为 圆+矩形）
-  let shapeText = text;
+  let shapeText = sanitized;
   const compoundMasks = [
     '圆角矩形', '圆角方块', '跑道形', '胶囊形',
     '菱形', '钻石形', '椭圆形', '三角形', '五角星',
@@ -298,8 +337,11 @@ export function hasComplexSignal(text) {
 }
 
 export function parseCommand(text) {
-  const original = text;
-  text = correctHomophones(text.trim().toLowerCase());
+  const sanitized = sanitizeVoiceText(text);
+  if (!sanitized) return { type: 'unknown', text: typeof text === 'string' ? text : '' };
+
+  const original = sanitized;
+  text = correctHomophones(sanitized.trim().toLowerCase());
 
   console.log(`[Parser] 原始: "${original}" → 纠正: "${text}"`);
 
@@ -315,18 +357,22 @@ export function parseCommand(text) {
     return { type: 'closeHelp' };
   }
 
-  // 1. 帮助指令
-  if (text.includes('帮助') || text.includes('我能说什么') || text.includes('怎么用') || text.includes('指令')) {
+  // 1. 帮助指令（固定句式，避免「需要帮助改3号」误触发）
+  if (/^(帮助|打开帮助|显示帮助|查看帮助)/.test(text)
+    || text.includes('我能说什么')
+    || text.includes('怎么用')
+    || /^指令(列表|说明|帮助)/.test(text)) {
     return { type: 'help' };
   }
 
-  // 2. 确认指令（允许口语尾缀：确认吧、好的啊）
-  if (/^确认/.test(text) || /^好的/.test(text) || text === '对' || /^是的/.test(text) || text === '没错') {
+  // 2. 确认指令（纯确认短句，避免「好的画一个圆」误触发）
+  if (/^(确认|好的|是的|对|没错)([吧呢啊呀]|的)?[。！？…]*$/.test(text)) {
     return { type: 'confirm' };
   }
 
-  // 3. 取消指令
-  if (/^取消/.test(text) || text === '不要' || text === '算了' || text === '不对') {
+  // 3. 取消指令（纯取消短句，避免「不要画圆」误触发）
+  if (/^取消/.test(text)
+    || /^(不要|算了|不对)([吧呢啊]|的)?[。！？…]*$/.test(text)) {
     return { type: 'cancel' };
   }
 
@@ -978,7 +1024,7 @@ function parseBatch(text) {
 const COMPOUND_SEPARATORS = ['先', '然后', '接着', '最后', '并且', '还要', '之后'];
 const COMPOUND_SPLIT_RE = /先|然后|接着|最后|并且|还要|之后|(?<!^)再/;
 
-/** 文本是否含复合分隔词（不含 hasComplexSignal 的「双绘制动词」等条件） */
+/** 文本是否含复合分隔词（不含 hasComplexSignal 的「双操作动词」等条件） */
 function hasCompoundSeparator(text) {
   if (COMPOUND_SEPARATORS.some((s) => text.includes(s))) return true;
   if (!text.startsWith('再') && !text.startsWith('继续') && text.includes('再')) return true;
@@ -996,7 +1042,10 @@ function splitCompoundParts(text) {
  * 任一子句低置信 → 返回 null，交给 hasComplexSignal / LLM 处理。
  */
 export function parseCompoundRules(rawText) {
-  const text = correctHomophones(rawText.trim().toLowerCase());
+  const sanitized = sanitizeVoiceText(rawText);
+  if (!sanitized) return null;
+
+  const text = correctHomophones(sanitized.trim().toLowerCase());
   if (!hasCompoundSeparator(text)) return null;
   if (text.startsWith('再') || text.startsWith('继续')) return null;
 
@@ -1117,11 +1166,12 @@ function parseLLMIntent(text, original) {
  * 策略：默认 low（交 LLM）；仅无歧义模板才 high。
  * 误走 LLM 可接受，规则高置信误执行不可接受。
  */
-function _assessConfidence(command, signals) {
+function _assessConfidence(command, signals, parserContext) {
   if (!command || command.type === 'unknown') return 'low';
 
   const hasTarget = command.target != null;
-  const hasSelection = store.getSelected() != null;
+  const hasSelection = parserContext?.hasSelection ?? (store.getSelected() != null);
+  const hasLastAction = parserContext?.hasLastAction ?? Boolean(store.state.lastAction);
   const hasObjectContext = hasTarget || hasSelection;
 
   switch (command.type) {
@@ -1183,7 +1233,7 @@ function _assessConfidence(command, signals) {
       return 'low';
 
     case 'refine':
-      return store.state.lastAction ? 'high' : 'low';
+      return hasLastAction ? 'high' : 'low';
 
     case 'undo':
     case 'redo':
@@ -1208,13 +1258,27 @@ function _assessConfidence(command, signals) {
  *   confidence !== 'high' → 转交 LLM 兜底（含语义理解）
  *
  * @param {string} rawText 原始 ASR 文本
+ * @param {{ hasSelection?: boolean, hasLastAction?: boolean }} [parserContext] 可选，用于解耦 store（单测注入）
  * @returns {{ command: object, confidence: 'high'|'low', signals: object }}
  */
-export function parseCommandWithConfidence(rawText) {
-  const normalized = correctHomophones(rawText.trim().toLowerCase());
+export function parseCommandWithConfidence(rawText, parserContext) {
+  const sanitized = sanitizeVoiceText(rawText);
+  if (!sanitized) {
+    return {
+      command: { type: 'unknown', text: '' },
+      confidence: 'low',
+      signals: {},
+    };
+  }
+
+  const normalized = correctHomophones(sanitized.trim().toLowerCase());
   const signals = detectAmbiguitySignals(normalized);
-  const command = parseCommand(rawText);
-  const confidence = _assessConfidence(command, signals);
+  const command = parseCommand(sanitized);
+  const ctx = parserContext ?? {
+    hasSelection: store.getSelected() != null,
+    hasLastAction: Boolean(store.state.lastAction),
+  };
+  const confidence = _assessConfidence(command, signals, ctx);
 
   console.log('[Parser]', {
     text: normalized,

@@ -5,57 +5,86 @@
 
 import store from '../state/store.js';
 
+const HIDE_DELAY_MS = 5200;
+const FADE_MS = 420;
+
 export class TaskListUI {
   constructor(containerEl) {
     this.container = containerEl;
     this.isVisible = false;
+    this._hideTimer = null;
+    this._fadeTimer = null;
 
-    // 监听任务队列变化
     store.on('taskQueue', () => this.render());
     store.on('currentTaskIndex', () => this.render());
   }
 
   /**
-   * 显示任务列表
+   * 显示任务列表（新指令到来时会立即清除上一条弹窗）
+   * @param {{ text?: string, description?: string, command?: object }[]} tasks
    */
   show(tasks) {
-    const taskList = tasks.map((t, i) => ({
-      text: t.description || this._taskToText(t),
+    this._cancelTimers();
+    this._resetPanel();
+
+    const taskList = tasks.map((t) => ({
+      text: t.text || t.description || this._taskToText(t.command || t),
       completed: false,
-      command: t,
+      command: t.command || t,
     }));
+
     store.addTasks(taskList);
     this.isVisible = true;
-    this.container.classList.add('visible');
+    requestAnimationFrame(() => {
+      this.container.classList.add('visible');
+    });
     this.render();
   }
 
-  /**
-   * 标记当前任务完成
-   */
   completeCurrent() {
     store.completeCurrentTask();
     this.render();
+  }
 
-    // 检查是否全部完成
-    const { taskQueue, currentTaskIndex } = store.state;
-    if (currentTaskIndex >= taskQueue.length) {
-      setTimeout(() => this.hide(), 2000);
+  scheduleHide(delay = HIDE_DELAY_MS) {
+    this._cancelTimers();
+    this._hideTimer = setTimeout(() => this.hide(), delay);
+  }
+
+  hide() {
+    this._cancelTimers();
+    if (!this.isVisible) {
+      this._resetPanel();
+      return;
+    }
+
+    this.container.classList.remove('visible');
+    this.container.classList.add('hiding');
+    this.isVisible = false;
+
+    this._fadeTimer = setTimeout(() => {
+      this._resetPanel();
+    }, FADE_MS);
+  }
+
+  _resetPanel() {
+    this.container.classList.remove('visible', 'hiding');
+    this.isVisible = false;
+    store.clearTasks();
+    this.container.innerHTML = '';
+  }
+
+  _cancelTimers() {
+    if (this._hideTimer) {
+      clearTimeout(this._hideTimer);
+      this._hideTimer = null;
+    }
+    if (this._fadeTimer) {
+      clearTimeout(this._fadeTimer);
+      this._fadeTimer = null;
     }
   }
 
-  /**
-   * 隐藏任务列表
-   */
-  hide() {
-    this.isVisible = false;
-    this.container.classList.remove('visible');
-    store.clearTasks();
-  }
-
-  /**
-   * 渲染任务列表
-   */
   render() {
     const { taskQueue, currentTaskIndex } = store.state;
 
@@ -64,20 +93,28 @@ export class TaskListUI {
       return;
     }
 
-    let html = '<div class="task-header">好的，我将：</div>';
+    const allDone = currentTaskIndex >= taskQueue.length;
+    const header = allDone ? '已执行以下操作' : '正在执行';
+
+    let html = `<div class="task-header">${header}</div>`;
 
     taskQueue.forEach((task, i) => {
-      const statusClass = task.completed ? 'completed' :
-                          i === currentTaskIndex ? 'active' : 'pending';
+      const isActive = !allDone && i === currentTaskIndex;
+      const statusClass = task.completed ? 'completed' : isActive ? 'active' : 'pending';
+      const icon = task.completed ? '✓' : isActive ? '●' : '○';
 
-      const icon = task.completed ? '✓' :
-                   i === currentTaskIndex ? '●' : '○';
+      let statusHtml = '';
+      if (task.completed) {
+        statusHtml = '<span class="task-done-tag">已完成</span>';
+      } else if (isActive) {
+        statusHtml = '<span class="task-status">执行中…</span>';
+      }
 
       html += `
         <div class="task-item ${statusClass}">
           <span class="task-icon">${icon}</span>
-          <span class="task-text">${task.text}</span>
-          ${i === currentTaskIndex && !task.completed ? '<span class="task-status">执行中...</span>' : ''}
+          <span class="task-text">${this._escapeHtml(task.text)}</span>
+          ${statusHtml}
         </div>
       `;
     });
@@ -85,19 +122,35 @@ export class TaskListUI {
     this.container.innerHTML = html;
   }
 
-  /**
-   * 将指令转为描述文本
-   */
+  _escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
   _taskToText(command) {
+    if (!command?.type) return '执行操作';
     switch (command.type) {
       case 'draw':
-        return `画一个${command.color ? '图形' : command.shape}`;
+        return `绘制${command.shape || '图形'}`;
       case 'color':
-        return `修改颜色`;
+        return '修改颜色';
       case 'move':
-        return `移动对象`;
+        return '移动对象';
+      case 'moveTo':
+        return '移动到指定位置';
       case 'resize':
-        return `调整大小`;
+        return command.factor > 1 ? '放大对象' : '缩小对象';
+      case 'connect':
+        return `连接 ${command.fromId}号和${command.toId}号`;
+      case 'delete':
+        return command.target ? `删除 ${command.target.value} 号` : '删除对象';
+      case 'addText':
+        return `添加文字：${command.content || ''}`;
+      case 'modifyText':
+        return `修改 ${command.refId} 号文字`;
       default:
         return '执行操作';
     }

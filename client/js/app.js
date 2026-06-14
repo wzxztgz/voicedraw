@@ -7,6 +7,7 @@ import store from './state/store.js';
 import Renderer from './canvas/renderer.js';
 import { createShape, COLOR_MAP, SHAPE_NAMES, colorToName, getShapeBounds, getShapeEdgePoint } from './canvas/shapes.js';
 import { parseCommandWithConfidence, parseCompoundRules, detectKeywords, hasComplexSignal, normalizeObjectId } from './parser/keyword.js';
+import { sanitizeVoiceText, validateCommand, isRuleFallbackEligible } from './parser/commandGuard.js';
 import { positionToCoords } from './canvas/grid.js';
 import contextManager from './parser/context.js';
 import voiceRecorder from './voice/recorder.js';
@@ -429,8 +430,23 @@ class VoiceDrawApp {
    *   Layer 2：单条 parseCommandWithConfidence → high 执行，否则 LLM
    */
   _processCommand(text) {
+    const sanitized = sanitizeVoiceText(text);
+    if (!sanitized) return;
+
     if (this.previewTimeout) clearTimeout(this.previewTimeout);
 
+    try {
+      this._routeCommand(sanitized);
+    } catch (err) {
+      console.error('[VoiceDraw] Command routing error:', err);
+      this.toast.error('指令处理出错，请重试');
+    }
+  }
+
+  /**
+   * 指令路由（Layer 0 / 1 / 2）
+   */
+  _routeCommand(text) {
     // Layer 0：规则复合快路径（标准「先/然后」模板，子句全部高置信）
     const compoundFast = parseCompoundRules(text);
     if (compoundFast?.confidence === 'high') {
@@ -440,11 +456,13 @@ class VoiceDrawApp {
       return;
     }
 
-    // Layer 1：复杂结构信号 → LLM
+    // Layer 1：复杂结构信号 → LLM（附带可降级的规则解析结果）
     if (hasComplexSignal(text)) {
       console.log('[VoiceDraw] Complex signal → LLM:', text);
       store.cancelPreview();
-      this._llmFallbackParse(text);
+      const { command, confidence } = parseCommandWithConfidence(text);
+      const ruleFallback = (confidence === 'low' && isRuleFallbackEligible(command)) ? command : null;
+      this._llmFallbackParse(text, ruleFallback);
       return;
     }
 
@@ -457,19 +475,26 @@ class VoiceDrawApp {
     }
 
     store.cancelPreview();
-    this._llmFallbackParse(text);
+    const ruleFallback = isRuleFallbackEligible(command) ? command : null;
+    this._llmFallbackParse(text, ruleFallback);
+  }
+
+  _tryRuleFallback(ruleFallback, text) {
+    if (!isRuleFallbackEligible(ruleFallback)) return false;
+    console.log('[VoiceDraw] LLM unavailable, rule fallback:', ruleFallback);
+    this.toast.info('已按规则理解执行', 2000);
+    this._executeCommand(ruleFallback, text);
+    return true;
   }
 
   /**
    * LLM 兜底指令解析
-   * 规则引擎返回 unknown 时调用，让 LLM 用语义理解来识别意图。
-   * - 先显示"正在理解..."提示，避免用户以为系统没响应
-   * - LLM 成功：转换为内部 command 对象并执行
-   * - LLM 失败/返回 unknown：降级为普通"没有理解"提示
+   * @param {string} text 用户语音文本
+   * @param {object|null} ruleFallback Layer 2 规则已解析的低置信 command，LLM 失败时可降级
    */
-  _llmFallbackParse(text) {
+  _llmFallbackParse(text, ruleFallback = null) {
     if (this._llmParseActive) {
-      this._llmParsePending = text;
+      this._llmParsePending = { text, ruleFallback };
       return;
     }
     this._llmParseActive = true;
@@ -482,15 +507,12 @@ class VoiceDrawApp {
       voiceRecorder.onLLMParseError = null;
       const pending = this._llmParsePending;
       this._llmParsePending = null;
-      if (pending) this._llmFallbackParse(pending);
+      if (pending) this._llmFallbackParse(pending.text, pending.ruleFallback);
     };
 
-    voiceRecorder.onLLMParseResult = (data) => {
-      const command = this._llmResultToCommand(data);
-      if (command) {
-        console.log('[VoiceDraw] LLM fallback succeeded:', command);
-        this._executeCommand(command, text);
-      } else {
+    const handleFailure = (reason) => {
+      console.warn('[VoiceDraw] LLM fallback failed:', reason);
+      if (!this._tryRuleFallback(ruleFallback, text)) {
         const clarification = contextManager.generateClarification(text);
         voiceSynth.speak(clarification);
         this.toast.warning(clarification, 4000);
@@ -498,15 +520,35 @@ class VoiceDrawApp {
       finish();
     };
 
-    voiceRecorder.onLLMParseError = (err) => {
-      console.warn('[VoiceDraw] LLM fallback error:', err);
-      const clarification = contextManager.generateClarification(text);
-      voiceSynth.speak(clarification);
-      this.toast.warning(clarification, 4000);
-      finish();
+    voiceRecorder.onLLMParseResult = (data) => {
+      try {
+        const command = this._llmResultToCommand(data);
+        if (!command) {
+          handleFailure('unrecognized');
+          return;
+        }
+        const check = validateCommand(command);
+        if (!check.ok) {
+          handleFailure(check.error);
+          return;
+        }
+        console.log('[VoiceDraw] LLM fallback succeeded:', command);
+        this._executeCommand(command, text);
+        finish();
+      } catch (err) {
+        handleFailure(err.message);
+      }
     };
 
-    voiceRecorder.sendLLMParse(text);
+    voiceRecorder.onLLMParseError = (err) => {
+      handleFailure(err?.message || err);
+    };
+
+    try {
+      voiceRecorder.sendLLMParse(text);
+    } catch (err) {
+      handleFailure(err.message);
+    }
   }
 
   /**
@@ -576,7 +618,7 @@ class VoiceDrawApp {
       }
       case 'batch-draw': {
         const count = typeof r.count === 'number' ? r.count : parseInt(r.count, 10);
-        if (!r.shape || !count || Number.isNaN(count)) return null;
+        if (!r.shape || !count || Number.isNaN(count) || count < 1 || count > 20) return null;
         return { type: 'batch-draw', shape: r.shape, color: r.color || null, count };
       }
       case 'batch-color':
@@ -615,12 +657,26 @@ class VoiceDrawApp {
    * @param {boolean} _isSubTask - true 时跳过 isProcessing 守卫（供复合指令内部调用）
    */
   async _executeCommand(command, originalText, _isSubTask = false) {
+    if (!command?.type) {
+      this.toast.warning('无法识别该指令');
+      return;
+    }
+
+    const check = validateCommand(command);
+    if (!check.ok) {
+      console.warn('[VoiceDraw] Command validation failed:', check.error, command);
+      voiceSynth.speak(check.error);
+      this.toast.warning(check.error, 3000);
+      return;
+    }
+
     if (!_isSubTask && this.isProcessing && command.type !== 'cancel') return;
 
     let result = null;
     let feedback = '';
 
-    switch (command.type) {
+    try {
+      switch (command.type) {
       case 'draw':
         result = this._execDraw(command);
         break;
@@ -730,31 +786,34 @@ class VoiceDrawApp {
 
       default:
         feedback = '未知指令';
-    }
-
-    // 生成反馈
-    if (!feedback && result) {
-      feedback = contextManager.generateFeedback(command, result);
-    }
-
-    // 并行反馈：视觉已通过 Canvas 自动更新，语音异步播报
-    if (feedback) {
-      voiceSynth.speak(feedback);
-      this.toast.success(feedback, 2000);
-    }
-
-    // 记录上下文
-    if (command.type !== 'unknown' && command.type !== 'help') {
-      contextManager.recordInteraction(originalText, command, result);
-      if (['draw', 'color', 'resize', 'move', 'refine'].includes(command.type)) {
-        contextManager.setActionContext(command);
       }
-    }
 
-    // 每次操作完成后清除预览和关键词提示
-    if (this.previewTimeout) clearTimeout(this.previewTimeout);
-    store.cancelPreview();
-    store.set('detectedKeywords', { color: null, shape: null, size: null, position: null });
+      // 生成反馈
+      if (!feedback && result) {
+        feedback = contextManager.generateFeedback(command, result);
+      }
+
+      if (feedback) {
+        voiceSynth.speak(feedback);
+        this.toast.success(feedback, 2000);
+      }
+
+      if (command.type !== 'unknown' && command.type !== 'help') {
+        contextManager.recordInteraction(originalText, command, result);
+        if (['draw', 'color', 'resize', 'move', 'refine'].includes(command.type)) {
+          contextManager.setActionContext(command);
+        }
+      }
+
+      if (this.previewTimeout) clearTimeout(this.previewTimeout);
+      store.cancelPreview();
+      store.set('detectedKeywords', { color: null, shape: null, size: null, position: null });
+    } catch (err) {
+      console.error('[VoiceDraw] Execute error:', command.type, err);
+      const msg = '执行出错，请重试';
+      voiceSynth.speak(msg);
+      this.toast.error(msg, 3000);
+    }
   }
 
   // ========== 指令执行方法 ==========
@@ -1072,10 +1131,11 @@ class VoiceDrawApp {
     }
 
     this.isProcessing = false;
+    this.taskList.render();
     voiceSynth.speak('所有任务已完成');
     this.toast.success('所有任务已完成');
 
-    setTimeout(() => this.taskList.hide(), 2000);
+    this.taskList.scheduleHide();
   }
 
   /**
@@ -1228,10 +1288,10 @@ class VoiceDrawApp {
    * 修改文字对象的内容
    * "把3号文字改成已完成"
    *
-   * 支持两种目标：
-   *   1. 直接文字对象（type === 'text'，非系统）→ 直接更新 content
-   *   2. LLM 图节点（rect/diamond/…）→ 找到绑定的 _parentId 系统标签，更新其 content
-   *      同时更新节点自身的 _nodeText 以保持一致
+   * 支持目标：
+   *   1. 独立文字对象（type === 'text'，非 _system）
+   *   2. LLM 图节点 → _system 子标签 + _nodeText
+   *   3. 手绘图形内嵌文字（addText 绑定，非 _system 子标签）
    */
   _execModifyText(command) {
     const obj = store.getObjectByNumber(command.refId);
@@ -1251,7 +1311,17 @@ class VoiceDrawApp {
       store.pushHistory();
       store.updateObjectNoHistory(nodeLabel.id, { content: command.content });
       store.updateObjectNoHistory(obj.id, { _nodeText: command.content });
-      // 手动触发视图更新
+      store.set('objects', [...store.state.objects]);
+      return obj;
+    }
+
+    // 手绘图形内嵌文字（addText 非 _system 子对象）
+    const childLabel = store.state.objects.find(
+      (o) => o._parentId === obj.id && o.type === 'text' && !o._system,
+    );
+    if (childLabel) {
+      store.pushHistory();
+      store.updateObjectNoHistory(childLabel.id, { content: command.content });
       store.set('objects', [...store.state.objects]);
       return obj;
     }
@@ -1574,12 +1644,30 @@ class VoiceDrawApp {
     const shapeName = SHAPE_NAMES[command.shape] || '';
     const colorName = command.color ? colorToName(command.color) : '';
 
+    const positionLabel = (pos) => {
+      if (!pos) return '';
+      const map = {
+        '-1,-1': '左上角', '1,-1': '右上角', '-1,1': '左下角', '1,1': '右下角',
+        '-1,0': '左边', '1,0': '右边', '0,-1': '上方', '0,1': '下方', '0,0': '中间',
+      };
+      return map[`${pos.dx},${pos.dy}`] || '';
+    };
+
     switch (command.type) {
-      case 'draw':
+      case 'draw': {
         if (command.shape === 'arrow-line' && command.fromId != null && command.toId != null) {
           return `画箭头 ${command.fromId}号→${command.toId}号`;
         }
-        return `画一个${colorName}${shapeName || '图形'}`;
+        const pos = positionLabel(command.position);
+        const sideMap = { right: '右边', left: '左边', above: '上面', below: '下面' };
+        const rel = command.relativeToId && command.relativeSide
+          ? `在${command.relativeToId}号${sideMap[command.relativeSide] || ''}`
+          : '';
+        const loc = pos ? `在${pos}` : rel;
+        const colorPart = colorName ? colorName : '';
+        const shapePart = shapeName || '图形';
+        return loc ? `${loc}画${colorPart}${shapePart}` : `画一个${colorPart}${shapePart}`;
+      }
       case 'color':
         return `修改颜色为${colorName || command.colorName}`;
       case 'resize':

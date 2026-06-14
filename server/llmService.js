@@ -153,9 +153,30 @@ class LLMService {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 基础指令解析（兜底用）
-// 当规则解析器返回 unknown 时，用此 prompt 让 LLM 尝试理解用户意图，
-// 输出与前端 command 结构完全兼容的 JSON。
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** 从 LLM 原始输出中提取 JSON 对象（容错 markdown 包裹与前后杂文本） */
+function extractJsonFromLlmContent(content) {
+  if (!content || typeof content !== 'string') {
+    throw new Error('LLM parse: empty content');
+  }
+  const stripped = content
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+  const start = stripped.indexOf('{');
+  const end = stripped.lastIndexOf('}');
+  if (start === -1 || end <= start) {
+    throw new Error('LLM parse: no JSON object in response');
+  }
+  const parsed = JSON.parse(stripped.slice(start, end + 1));
+  if (!parsed || typeof parsed !== 'object' || !parsed.type) {
+    throw new Error('LLM parse: missing type field');
+  }
+  return parsed;
+}
+
 const PARSE_SYSTEM_PROMPT = `你是一个语音绘图指令解析器。将中文语音输入转化为绘图命令JSON。
 只返回合法JSON，不含任何解释、代码块标记或多余文字。
 画布：800×600，坐标原点左上角。
@@ -269,12 +290,15 @@ LLMService.prototype.parseBasicCommand = async function (userText) {
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
+          if (res.statusCode && res.statusCode >= 400) {
+            return reject(new Error(`LLM parse HTTP ${res.statusCode}`));
+          }
           const response = JSON.parse(data);
           if (response.code) return reject(new Error(`LLM Parse Error: ${response.message || response.code}`));
-          const content = response.output?.choices?.[0]?.message?.content;
-          if (!content) return reject(new Error('LLM parse: empty content'));
-          const jsonStr = content.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-          resolve(JSON.parse(jsonStr));
+          const content = response.output?.choices?.[0]?.message?.content
+            ?? response.output?.text
+            ?? response.choices?.[0]?.message?.content;
+          resolve(extractJsonFromLlmContent(content));
         } catch (e) {
           reject(new Error(`LLM parse failed: ${e.message}`));
         }
