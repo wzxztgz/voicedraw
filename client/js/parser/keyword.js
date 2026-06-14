@@ -847,6 +847,12 @@ function parseColorChange(text) {
 
   if (!color) return null;
 
+  // 多编号批量改色：「将1号2号3号改为绿色」→ 全部目标，而非仅第一个
+  const allNums = extractAllNumbers(text);
+  if (allNums.length >= 2) {
+    return { type: 'batch-color', color, colorName, targetIds: allNums };
+  }
+
   return { type: 'color', color, colorName, target: extractTarget(text) };
 }
 

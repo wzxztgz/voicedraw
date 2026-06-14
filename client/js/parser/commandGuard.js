@@ -164,6 +164,16 @@ export function validateCommand(command) {
       if (command.filterShape != null && !VALID_SHAPES.has(command.filterShape)) {
         return { ok: false, error: '筛选形状无效' };
       }
+      if (command.targetIds != null) {
+        if (!Array.isArray(command.targetIds) || command.targetIds.length < 1) {
+          return { ok: false, error: '批量改色目标编号无效' };
+        }
+        for (const id of command.targetIds) {
+          if (!Number.isInteger(id) || id < 1) {
+            return { ok: false, error: '批量改色目标编号无效' };
+          }
+        }
+      }
       return { ok: true };
 
     case 'compound': {
