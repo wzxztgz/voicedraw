@@ -1,28 +1,38 @@
 @echo off
-chcp 65001 >nul
+setlocal EnableExtensions
+cd /d "%~dp0"
+
 echo ========================================
-echo   声绘 VoiceDraw - 启动中...
+echo   VoiceDraw - Starting...
 echo ========================================
 echo.
 
-REM 启动后端服务
-echo [1/2] 启动后端 WebSocket 服务 (端口 8765)...
-start "VoiceDraw Server" /B cmd /c "cd /d %~dp0server && node index.js"
+if not exist "%~dp0server\index.js" (
+  echo [ERROR] server\index.js not found.
+  echo Run from voicedraw folder. Current: %~dp0
+  pause
+  exit /b 1
+)
+
+if not exist "%~dp0client\package.json" (
+  echo [ERROR] client\package.json not found.
+  pause
+  exit /b 1
+)
+
+echo [1/2] Backend WebSocket ws://localhost:8765
+start "VoiceDraw-Server" /D "%~dp0server" cmd /k node index.js
+
 timeout /t 2 /nobreak >nul
 
-REM 启动前端开发服务器
-echo [2/2] 启动前端开发服务器 (端口 3000)...
-start "VoiceDraw Client" /B cmd /c "cd /d %~dp0client && npx vite --host"
+echo [2/2] Frontend http://localhost:3000
+start "VoiceDraw-Client" /D "%~dp0client" cmd /k npx vite --host
 
 echo.
 echo ========================================
-echo   启动完成！
-echo   前端: http://localhost:3000
-echo   后端: ws://localhost:8765
+echo   Started.
+echo   Open: http://localhost:3000
+echo   Close Server/Client windows to stop.
 echo ========================================
 echo.
-echo 按 Ctrl+C 停止所有服务
-echo.
-
-REM 等待用户中断
-waitfor /t 3600 pause >nul 2>&1 || echo.
+pause
