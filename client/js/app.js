@@ -623,10 +623,14 @@ class VoiceDrawApp {
       }
       case 'batch-color':
         if (!r.color) return null;
+        const targetIds = Array.isArray(r.targetIds)
+          ? r.targetIds.map((id) => normalizeObjectId(id)).filter((id) => id != null)
+          : null;
         return {
           type: 'batch-color',
           color: r.color,
           filterShape: r.filterShape || null,
+          targetIds: targetIds?.length ? targetIds : null,
         };
       case 'export':
         return { type: 'export' };
@@ -1167,14 +1171,30 @@ class VoiceDrawApp {
    * filterShape 有值时只改该类型，否则改全部可交互对象。
    */
   _execBatchColor(command) {
-    const targets = store.state.objects.filter((o) => {
-      if (o._system) return false;                              // 跳过系统装饰元素
-      if (command.filterShape && o.type !== command.filterShape) return false;
-      return true;
-    });
+    let targets;
+    if (Array.isArray(command.targetIds) && command.targetIds.length > 0) {
+      const missing = [];
+      targets = [];
+      for (const id of command.targetIds) {
+        const obj = store.getObjectByNumber(id);
+        if (obj && !obj._system) targets.push(obj);
+        else missing.push(id);
+      }
+      if (missing.length > 0) {
+        this.toast.warning(`未找到 ${missing.join('、')} 号对象`);
+      }
+    } else {
+      targets = store.state.objects.filter((o) => {
+        if (o._system) return false;                              // 跳过系统装饰元素
+        if (command.filterShape && o.type !== command.filterShape) return false;
+        return true;
+      });
+    }
 
     if (targets.length === 0) {
-      const hint = command.filterShape ? `画布上没有${command.filterShape}` : '画布上没有可修改的对象';
+      const hint = command.targetIds?.length
+        ? '未找到可修改的目标对象'
+        : (command.filterShape ? `画布上没有${command.filterShape}` : '画布上没有可修改的对象');
       this.toast.warning(hint);
       return null;
     }
@@ -1693,6 +1713,9 @@ class VoiceDrawApp {
       case 'batch-draw':
         return `画 ${command.count} 个${SHAPE_NAMES[command.shape] || command.shape}`;
       case 'batch-color':
+        if (command.targetIds?.length) {
+          return `将 ${command.targetIds.join('、')} 号改色为${colorName}`;
+        }
         return `批量改色为${colorName}`;
       default:
         return '执行操作';
