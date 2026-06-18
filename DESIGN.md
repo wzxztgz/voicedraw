@@ -168,11 +168,11 @@
 
 ## 2\.2 全链路最终数据流
 
-![](C:\Users\DELLJJ\AppData\Roaming\TRAE SOLO CN\ModularData\ai-agent\work-mode-projects\6a2b480e1ddc93a172f953f3\voicedraw\images\系统架构总览图.png)
+![系统架构图](./images/系统架构总览图.png)
 
 ## 2\.3 四层指令路由
 
-![](C:\Users\DELLJJ\AppData\Roaming\TRAE SOLO CN\ModularData\ai-agent\work-mode-projects\6a2b480e1ddc93a172f953f3\voicedraw\images\四层路由图.png)
+![四层路由图](./images/四层路由图.png)
 
 |路由层级|触发条件|平均延迟|业务示例|
 |---|---|---|---|
